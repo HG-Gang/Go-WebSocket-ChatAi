@@ -1,0 +1,33 @@
+# conf/models/openai.yaml
+# OpenAI Realtime API 特定模型配置文件。
+# API Key 必须通过 OPENAI_API_KEY 环境变量注入，避免推送到 GitHub 时泄漏密钥。
+
+enabled: true
+api_key: "${OPENAI_API_KEY}"
+# default_model 由 conf/config.yaml 的 models.openai.default_model 作为更高优先级覆盖。
+default_model: "gpt-realtime"
+instructions: "你是一个智能助手，帮助用户解决问题"
+voice: "alloy"
+rate_rps: 10
+rate_burst: 20
+max_session_ttl: 3600
+organization: ""
+extra: {}
+
+# OpenAI Realtime 专属配置。
+realtime:
+  ws_url: "wss://api.openai.com/v1/realtime"
+  reconnect_max_retries: 3
+  reconnect_delay: "1s"
+  # App↔Go 心跳配置。
+  app_ping_interval: "30s"
+  app_pong_timeout: "60s"
+  # Go↔OpenAI 心跳与读写超时配置。
+  api_read_timeout: "120s"
+  api_ping_interval: "30s"
+  api_pong_timeout: "90s"
+  api_write_timeout: "10s"
+  # OpenAI 重连后的最小会话恢复策略。
+  restore_session: true
+  restore_history_limit: 32
+  send_queue_timeout_ms: 250

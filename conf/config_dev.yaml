@@ -1,0 +1,26 @@
+# conf/config_dev.yaml
+# 开发环境配置覆盖
+# 此文件中的设置将覆盖 config.yaml 中的同名项，适用于本地开发和调试。
+
+env: dev
+
+server:
+  mode: debug        # 开发模式下开启更详细的日志输出
+
+jwt:
+  enabled: true
+  secret: "dev-jwt-secret-for-local-testing-only" # 本地测试专用密钥
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""       # 本地 Redis 通常无密码
+
+logs:
+  root_dir: "./logs"
+
+# 开发环境下特殊调整
+rate_limit:
+  enabled: false      # 开发环境下关闭限流，方便进行压力测试或频繁调试
+
+fallback:
+  enabled: true       # 开启降级功能，便于在 WebSocket 连通性不佳时测试 HTTP 备份路径

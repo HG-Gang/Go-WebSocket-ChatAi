@@ -1,0 +1,33 @@
+# conf/models/openairesponses.yaml
+# OpenAI Responses API 独立配置。
+# 该配置专门给 /v1/responses HTTP 接口使用，不能和 Realtime WebSocket 的 openai 模型配置混在一起。
+enabled: true
+api_key: "${OPENAI_API_KEY}"
+default_model: "gpt-4.1"
+endpoint: "https://api.openai.com/v1"
+instructions: "你是一个智能助手，请用中文简洁回答用户的问题。"
+voice: ""
+rate_rps: 10
+rate_burst: 20
+max_session_ttl: 0
+organization: ""
+extra:
+  # timeout_ms 控制 Go 网关等待 OpenAI Responses API HTTP 返回的最长时间。
+  timeout_ms: 60000
+  # store=false 表示默认不让 OpenAI 保存本次响应，调用方显式传 store 时以调用方为准。
+  store: false
+
+realtime:
+  name: ""
+  ws_url: ""
+  reconnect_max_retries: 0
+  reconnect_delay: ""
+  app_ping_interval: ""
+  app_pong_timeout: ""
+  api_read_timeout: ""
+  api_ping_interval: ""
+  api_pong_timeout: ""
+  api_write_timeout: ""
+  restore_session: false
+  restore_history_limit: 0
+  send_queue_timeout_ms: 0

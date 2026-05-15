@@ -1,0 +1,40 @@
+# conf/models/azureai.yaml
+# Azure OpenAI 预留模型配置。
+# 当前主链路使用 OpenAI Realtime，本配置默认关闭，避免 0 字节文件被误判为缺失配置。
+
+enabled: false
+api_key: "${AZURE_OPENAI_API_KEY}"
+default_model: ""
+endpoint: ""
+instructions: ""
+voice: "alloy"
+rate_rps: 5
+rate_burst: 10
+max_session_ttl: 3600
+organization: ""
+extra:
+  deployment_name: ""
+  api_version: ""
+  chat_deployment: ""
+  completions_deployment: ""
+  responses_deployment: ""
+  realtime_deployment: ""
+  image_deployment: ""
+  tts_deployment: ""
+  stt_deployment: ""
+  tst_deployment: ""
+
+realtime:
+  name: "azure-openai-realtime"
+  ws_url: ""
+  reconnect_max_retries: 3
+  reconnect_delay: "1s"
+  app_ping_interval: "30s"
+  app_pong_timeout: "60s"
+  api_read_timeout: "120s"
+  api_ping_interval: "30s"
+  api_pong_timeout: "90s"
+  api_write_timeout: "10s"
+  restore_session: true
+  restore_history_limit: 32
+  send_queue_timeout_ms: 250

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TozoAI WebSocket 测试面板</title>
+    <link rel="stylesheet" href="style.css?v=20260515-send-events">
+</head>
+<body>
+    <div class="container">
+        <!-- 顶部标题栏 -->
+        <header class="header">
+            <h1>TozoAI WebSocket 测试面板</h1>
+            <p class="subtitle">双端心跳检测 + 断线重连 功能验证工具</p>
+            <p style="margin-top:8px;font-size:13px;">
+                <a href="/web/audio.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">语音对话测试</a> |
+                <a href="/web/redis.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">Redis 监控</a> |
+                <a href="/web/diagnostics.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">诊断看板</a> |
+                <a href="/web/responses.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">Responses 测试</a> |
+                <a href="/web/azure.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">Azure 监控</a>
+            </p>
+            <div class="theme-switcher">
+                <label for="theme-select">颜色模式</label>
+                <select id="theme-select">
+                    <option value="dark">深色</option>
+                    <option value="light">浅色</option>
+                    <option value="ocean">海蓝</option>
+                    <option value="sepia">暖色</option>
+                    <option value="contrast">高对比</option>
+                </select>
+            </div>
+        </header>
+
+        <!-- 连接配置区 -->
+        <section class="panel" id="config-panel">
+            <h2>1. 连接配置</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="user-id">用户 ID（通过 URL ?userId=xxx 传入）</label>
+                    <input type="text" id="user-id" value="1001" placeholder="如：1001">
+                </div>
+                <div class="form-group">
+                    <label for="ws-url">WebSocket 地址</label>
+                    <input type="text" id="ws-url" value="ws://127.0.0.1:8096/ws/realtime/openai" placeholder="ws://host:port/path">
+                </div>
+                <div class="form-group">
+                    <label for="token">JWT Token（留空自动获取）</label>
+                    <input type="text" id="token" placeholder="Bearer eyJhbGciOiJI...">
+                    <button class="btn btn-sm" id="btn-gen-token">自动获取 Token</button>
+                </div>
+                <div class="form-group">
+                    <label for="token-api">Token 接口地址</label>
+                    <input type="text" id="token-api" value="http://127.0.0.1:8096/test/generate-token" placeholder="http://host:port/test/generate-token">
+                </div>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="btn-connect">连接</button>
+                <button class="btn btn-danger" id="btn-disconnect" disabled>断开</button>
+                <button class="btn btn-warning" id="btn-reconnect" disabled>手动重连</button>
+            </div>
+        </section>
+
+        <!-- 连接状态区 -->
+        <section class="panel" id="status-panel">
+            <h2>2. 连接状态</h2>
+            <div class="status-grid">
+                <div class="status-card">
+                    <span class="status-label">连接状态</span>
+                    <span class="status-value" id="conn-status">
+                        <span class="status-dot disconnected"></span> 未连接
+                    </span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">会话 ID</span>
+                    <span class="status-value" id="session-id">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">连接时长</span>
+                    <span class="status-value" id="conn-duration">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">最后 Ping</span>
+                    <span class="status-value" id="last-ping">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">最后 Pong</span>
+                    <span class="status-value" id="last-pong">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">收到消息数</span>
+                    <span class="status-value" id="msg-count">0</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">发送消息数</span>
+                    <span class="status-value" id="sent-count">0</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">重连次数</span>
+                    <span class="status-value" id="reconnect-count">0</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- App / Go / OpenAI 链路统计区 -->
+        <section class="panel" id="link-stats-panel">
+            <h2>3. 链路统计</h2>
+            <p class="hint">
+                这里聚合 App→Go→OpenAI→Go→App 的关键事件，便于观察长连接、流式响应、音频包、错误和重连信号。
+            </p>
+            <div class="status-grid">
+                <div class="status-card">
+                    <span class="status-label">Go 健康状态</span>
+                    <span class="status-value" id="go-health-status">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Go 活跃会话</span>
+                    <span class="status-value" id="go-health-active">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Go 时间</span>
+                    <span class="status-value" id="go-health-time">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">最近事件</span>
+                    <span class="status-value">
+                        <span id="stat-last-event" title="鼠标悬停可看最近事件摘要">-</span>
+                        <button class="btn btn-sm inline-btn" id="btn-recent-events" type="button">明细</button>
+                    </span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">最近 response_id</span>
+                    <span class="status-value" id="stat-last-response-id">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Session 事件</span>
+                    <span class="status-value">
+                        <span id="stat-session-events" title="鼠标悬停可看最近 Session 事件摘要">0</span>
+                        <button class="btn btn-sm inline-btn" id="btn-session-events" type="button">明细</button>
+                    </span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">响应开始/结束</span>
+                    <span class="status-value"><span id="stat-begin-count">0</span>/<span id="stat-end-count">0</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">错误/重连要求</span>
+                    <span class="status-value"><span id="stat-error-count">0</span>/<span id="stat-reconnect-required">0</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">文本字符</span>
+                    <span class="status-value" id="stat-text-chars">0</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">转写字符</span>
+                    <span class="status-value" id="stat-transcript-chars">0</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">音频事件/字节</span>
+                    <span class="status-value"><span id="stat-audio-events">0</span>/<span id="stat-audio-bytes">0</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">响应耗时 最近/平均</span>
+                    <span class="status-value"><span id="stat-last-latency">-</span>/<span id="stat-avg-latency">-</span></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 心跳测试区 -->
+        <section class="panel" id="heartbeat-panel">
+            <h2>4. 心跳测试</h2>
+            <p class="hint">
+                Go 服务端通过 WS Ping/Pong 协议检测 App 心跳。
+                浏览器自动响应 Ping（无需手动），此区域用于查看心跳状态和模拟超时。
+            </p>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="heartbeat-interval">模拟心跳间隔（秒）</label>
+                    <input type="number" id="heartbeat-interval" value="10" min="1" max="300">
+                </div>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="btn-start-heartbeat" disabled>启动客户端心跳</button>
+                <button class="btn btn-danger" id="btn-stop-heartbeat" disabled>停止客户端心跳</button>
+                <button class="btn btn-warning" id="btn-simulate-timeout" disabled>模拟心跳超时（停止响应 60s）</button>
+            </div>
+            <div class="heartbeat-timeline" id="heartbeat-timeline">
+                <!-- 心跳事件时间线 -->
+            </div>
+        </section>
+
+        <!-- 消息发送区 -->
+        <section class="panel" id="send-panel">
+            <h2>5. 消息发送</h2>
+            <p class="hint">
+                普通测试只需要在“用户问题”里输入内容，然后点击“发送用户问题给 GPT”。下面的消息类型和 JSON 内容属于高级调试，用来直接发送 OpenAI Realtime 原生事件或旧协议消息。
+            </p>
+            <div class="form-group">
+                <label for="quick-text-input">用户问题（直接发给 GPT）</label>
+                <input type="text" id="quick-text-input" value="你好，请用一句话介绍一下你自己。" placeholder="输入用户要咨询 GPT 的问题">
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="btn-send-text-msg" disabled>发送用户问题给 GPT</button>
+            </div>
+            <hr class="panel-divider">
+            <div class="form-group">
+                <label for="msg-type">高级调试：消息类型</label>
+                <select id="msg-type">
+                    <option value="conversation.item.create">conversation.item.create（写入用户文本）</option>
+                    <option value="response.create">response.create（触发 OpenAI 回复）</option>
+                    <option value="response.cancel">response.cancel（取消当前回复）</option>
+                    <option value="session.update">session.update（更新 Realtime 会话配置）</option>
+                    <option value="input_audio_buffer.append">input_audio_buffer.append（追加 base64 音频）</option>
+                    <option value="input_audio_buffer.commit">input_audio_buffer.commit（提交音频缓冲区）</option>
+                    <option value="input_audio_buffer.clear">input_audio_buffer.clear（清空音频缓冲区）</option>
+                    <option value="conversation.item.delete">conversation.item.delete（删除会话条目）</option>
+                    <option value="conversation.item.truncate">conversation.item.truncate（截断助手音频条目）</option>
+                    <option value="legacy.text">旧协议 text（兼容 App 文本消息）</option>
+                    <option value="legacy.stop">旧协议 stop（停止当前回复）</option>
+                    <option value="legacy.session_close">旧协议 session_close_gpt（关闭 GPT 会话）</option>
+                    <option value="ping">ping（应用层心跳）</option>
+                    <option value="custom">自定义 JSON（手写任意事件）</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="msg-body">高级调试：消息内容（JSON）</label>
+                <textarea id="msg-body" rows="14" placeholder="这里会显示所选消息类型的 JSON 模板；普通提问不需要手动编辑这里。"></textarea>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-warning" id="btn-send" disabled>发送上方 JSON 事件</button>
+                <button class="btn btn-sm" id="btn-fill-template">按消息类型填充 JSON 模板</button>
+            </div>
+        </section>
+
+        <!-- 完整响应区 -->
+        <section class="panel" id="complete-response-panel">
+            <h2>6. OpenAI 完整响应</h2>
+            <p class="hint">
+                流式 text/transcript delta 会在这里按 response_id 聚合；response.done/end 到达后显示最终完整内容。
+            </p>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="complete-response-list">响应列表</label>
+                    <select id="complete-response-list"></select>
+                </div>
+                <div class="form-group">
+                    <label>当前响应摘要</label>
+                    <div class="status-card compact-card">
+                        <span class="status-value" id="complete-response-meta">-</span>
+                    </div>
+                </div>
+            </div>
+            <pre class="response-output" id="complete-response-content">暂无完整响应</pre>
+            <div class="btn-group">
+                <button class="btn btn-sm" id="btn-clear-responses" type="button">清空完整响应</button>
+            </div>
+        </section>
+
+        <!-- 日志区 -->
+        <section class="panel" id="log-panel">
+            <h2>7. 实时日志</h2>
+            <div class="log-toolbar">
+                <label><input type="checkbox" id="log-auto-scroll" checked> 自动滚动</label>
+                <label><input type="checkbox" id="log-show-heartbeat"> 显示心跳日志</label>
+                <label><input type="checkbox" id="log-show-raw" checked> 显示原始数据</label>
+                <button class="btn btn-sm" id="btn-clear-log">清空日志</button>
+                <button class="btn btn-sm" id="btn-export-log">导出日志</button>
+            </div>
+            <div class="log-container" id="log-container">
+                <div class="log-entry info">
+                    <span class="log-time">[--:--:--]</span>
+                    <span class="log-tag">[系统]</span>
+                    <span class="log-msg">测试面板已加载，请点击"连接"开始测试</span>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <div class="modal-backdrop" id="recent-events-modal" hidden>
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>最近链路事件明细</h3>
+                <button class="btn btn-sm" id="btn-close-recent-events" type="button">关闭</button>
+            </div>
+            <div class="session-event-list" id="recent-event-list">暂无最近事件</div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="session-events-modal" hidden>
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>当前会话 Session 事件明细</h3>
+                <button class="btn btn-sm" id="btn-close-session-events" type="button">关闭</button>
+            </div>
+            <div class="session-event-list" id="session-event-list">暂无 Session 事件</div>
+        </div>
+    </div>
+
+    <script src="ws-test.js?v=20260515-send-events"></script>
+</body>
+</html>

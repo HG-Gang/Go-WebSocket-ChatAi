@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure OpenAI 监控</title>
+    <link rel="stylesheet" href="style.css?v=20260515-azure">
+    <style>
+        .container { max-width: 1380px; }
+        .nav a { color: var(--accent-blue); text-decoration: none; margin: 0 8px; font-size: 13px; }
+        .metric-grid-wide { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:12px; }
+        @media (max-width: 980px) { .metric-grid-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 560px) { .metric-grid-wide { grid-template-columns: 1fr; } }
+        .metric { background:var(--bg-tertiary); border:1px solid var(--border); border-radius:6px; padding:12px; min-height:82px; }
+        .metric .label { color:var(--text-muted); font-size:12px; }
+        .metric .value { color:var(--text-primary); font-family:var(--font-mono); font-size:16px; word-break:break-all; margin-top:4px; }
+        .metric .sub { color:var(--text-secondary); font-size:12px; margin-top:4px; }
+        .table-lite { width:100%; border-collapse:collapse; font-size:13px; }
+        .table-lite th, .table-lite td { border-bottom:1px solid var(--border); padding:8px; text-align:left; vertical-align:top; }
+        .table-lite th { color:var(--text-secondary); }
+        .json-box { background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:420px; overflow:auto; white-space:pre-wrap; font-family:var(--font-mono); font-size:12px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header class="header">
+        <h1>Azure OpenAI 监控</h1>
+        <p class="subtitle">Azure Realtime、普通聊天、图片、TTS、STT、TST 配置、路由与能力监控</p>
+        <div class="nav" style="margin-top:8px;">
+            <a href="/web/" target="_blank" rel="noopener noreferrer">WS 测试面板</a>
+            <a href="/web/diagnostics.html" target="_blank" rel="noopener noreferrer">诊断看板</a>
+            <a href="/web/responses.html" target="_blank" rel="noopener noreferrer">Responses 测试</a>
+        </div>
+    </header>
+
+    <section class="panel">
+        <h2>刷新控制</h2>
+        <div class="btn-group">
+            <button class="btn btn-primary" id="btn-refresh">刷新</button>
+            <button class="btn btn-sm" id="btn-copy">复制原始 JSON</button>
+        </div>
+        <p class="hint" id="last-refresh" style="margin-top:10px;">等待刷新</p>
+    </section>
+
+    <section class="panel">
+        <h2>Azure 基础配置</h2>
+        <div class="metric-grid-wide">
+            <div class="metric"><div class="label">启用状态</div><div class="value" id="az-enabled">-</div><div class="sub" id="az-key">-</div></div>
+            <div class="metric"><div class="label">Endpoint</div><div class="value" id="az-endpoint">-</div><div class="sub" id="az-api-version">-</div></div>
+            <div class="metric"><div class="label">默认模型</div><div class="value" id="az-model">-</div><div class="sub" id="az-voice">-</div></div>
+            <div class="metric"><div class="label">网络代理</div><div class="value" id="az-proxy">-</div><div class="sub">HTTPS_PROXY 对 Azure HTTPS/WSS 生效</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Azure 模块监控</h2>
+        <table class="table-lite">
+            <thead>
+            <tr><th>模块</th><th>Deployment</th><th>当前状态</th><th>本地接口</th><th>上游路径/监控重点</th></tr>
+            </thead>
+            <tbody id="module-body"></tbody>
+        </table>
+    </section>
+
+    <section class="panel">
+        <h2>Azure Realtime 心跳与重连配置</h2>
+        <div class="metric-grid-wide">
+            <div class="metric"><div class="label">WS URL</div><div class="value" id="az-ws">-</div><div class="sub" id="az-name">-</div></div>
+            <div class="metric"><div class="label">App 心跳</div><div class="value" id="az-app-heartbeat">-</div><div class="sub">Go 到 App Ping / 等待 Pong</div></div>
+            <div class="metric"><div class="label">Azure 超时</div><div class="value" id="az-api-timeout">-</div><div class="sub">读超时 / 写超时</div></div>
+            <div class="metric"><div class="label">重连策略</div><div class="value" id="az-reconnect">-</div><div class="sub" id="az-restore">-</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>原始 Azure 诊断 JSON</h2>
+        <pre class="json-box" id="raw-json">-</pre>
+    </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastRaw = '';
+
+document.addEventListener('DOMContentLoaded', () => {
+    $('btn-refresh').addEventListener('click', refresh);
+    $('btn-copy').addEventListener('click', copyRaw);
+    refresh();
+    setInterval(refresh, 5000);
+});
+
+async function refresh() {
+    try {
+        const payload = await fetchJSON('/api/debug/status');
+        const data = payload.data || {};
+        const azure = data.azure || {};
+        const network = data.network || {};
+        const realtime = azure.realtime || {};
+        lastRaw = JSON.stringify({ azure, network }, null, 2);
+
+        $('az-enabled').textContent = azure.enabled ? '已启用' : '已关闭';
+        $('az-key').textContent = azure.api_key_configured ? 'API Key 已配置' : 'API Key 缺失';
+        $('az-endpoint').textContent = azure.endpoint || '-';
+        $('az-api-version').textContent = azure.api_version ? 'api-version=' + azure.api_version : 'api-version 未配置';
+        $('az-model').textContent = azure.default_model || azure.deployment_name || '-';
+        $('az-voice').textContent = azure.voice ? 'voice=' + azure.voice : '-';
+        $('az-proxy').textContent = network.azure_proxy_enabled ? (network.azure_proxy_effective || '已启用') : '未启用';
+
+        $('az-ws').textContent = realtime.ws_url || '-';
+        $('az-name').textContent = realtime.name || '-';
+        $('az-app-heartbeat').textContent = `${realtime.app_ping_interval || '-'} / ${realtime.app_pong_timeout || '-'}`;
+        $('az-api-timeout').textContent = `${realtime.api_read_timeout || '-'} / ${realtime.api_write_timeout || '-'}`;
+        $('az-reconnect').textContent = `${realtime.reconnect_max_retries ?? '-'} / ${realtime.reconnect_delay || '-'}`;
+        $('az-restore').textContent = `${realtime.restore_session ? '恢复 session' : '不恢复 session'} / history ${realtime.restore_history_limit ?? '-'}`;
+
+        renderModules(azure);
+        $('raw-json').textContent = lastRaw;
+        $('last-refresh').textContent = '最后刷新：' + new Date().toLocaleString();
+    } catch (err) {
+        $('last-refresh').textContent = '刷新失败：' + err.message;
+    }
+}
+
+function renderModules(azure) {
+    const modules = Array.isArray(azure.modules) ? azure.modules.map(item => [
+        item.name,
+        item.deployment,
+        item.implemented ? (item.configured ? '已接入，deployment 已配置' : '已接入，deployment 待配置') : '未接入',
+        `${item.method || '-'} ${item.route || '-'}`,
+        `${item.upstream || '-'}；重点看延迟、状态码、错误码、限流和响应大小`
+    ]) : [
+        ['Realtime', azure.realtime_deployment || azure.deployment_name, '已接入', 'GET /ws/realtime/azure', '连接数、心跳、重连、音频上下行'],
+        ['Chat Completions', azure.chat_deployment || azure.deployment_name, '已接入', 'POST /api/azure/chat/completions', '延迟、token、错误码、限流'],
+        ['Completions', azure.completions_deployment || azure.chat_deployment, '已接入', 'POST /api/azure/completions', '延迟、错误码、限流'],
+        ['文生图', azure.image_deployment, '已接入', 'POST /api/azure/images/generations', '生成耗时、尺寸、失败原因'],
+        ['图生图', azure.image_deployment, '已接入', 'POST /api/azure/images/edits', '输入图片大小、输出数量、失败原因'],
+        ['TTS', azure.tts_deployment, '已接入', 'POST /api/azure/audio/speech', '音频格式、耗时、字数'],
+        ['STT', azure.stt_deployment, '已接入', 'POST /api/azure/audio/transcriptions', '音频时长、转写耗时、错误码'],
+        ['TST', azure.tst_deployment, '已接入', 'POST /api/azure/tst', '源语言、目标语言、实时延迟']
+    ];
+    const body = $('module-body');
+    body.innerHTML = '';
+    modules.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach(value => {
+            const td = document.createElement('td');
+            td.textContent = value || '-';
+            tr.appendChild(td);
+        });
+        body.appendChild(tr);
+    });
+}
+
+async function copyRaw() {
+    await navigator.clipboard.writeText(lastRaw || $('raw-json').textContent || '');
+    $('last-refresh').textContent = '已复制原始 JSON：' + new Date().toLocaleString();
+}
+
+async function fetchJSON(url) {
+    const resp = await fetch(url, { cache: 'no-store' });
+    const text = await resp.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!resp.ok) throw new Error(data.error || data.message || 'HTTP ' + resp.status);
+    return data;
+}
+</script>
+</body>
+</html>

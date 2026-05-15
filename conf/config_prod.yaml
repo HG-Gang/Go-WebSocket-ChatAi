@@ -1,0 +1,26 @@
+# conf/config_prod.yaml
+# 生产环境配置覆盖
+# 针对生产部署的安全性和性能优化。
+
+env: prod
+
+server:
+  addr: ":443"       # 生产环境通常监听 HTTPS 443 端口
+  mode: release      # 切换至 Release 模式，关闭 Gin 的调试日志
+
+redis:
+  addr: ""           # 生产 Redis 地址（建议通过环境变量或内网 DNS 配置）
+  password: ""       # 生产 Redis 密码（必须加密或通过 Secret 注入）
+
+jwt:
+  enabled: true
+  secret: ""         # 生产密钥严禁提交至代码库，应通过环境变量注入
+
+logs:
+  root_dir: "./logs"
+
+rate_limit:
+  enabled: true       # 生产环境必须开启限流保护
+
+billing:
+  enabled: true       # 生产环境开启计费统计

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenAI Responses API 测试</title>
+    <link rel="stylesheet" href="style.css?v=20260515-responses">
+    <style>
+        .container { max-width: 1280px; }
+        .nav a { color: var(--accent-blue); text-decoration: none; margin: 0 8px; font-size: 13px; }
+        .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:20px; }
+        @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+        .kv { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:12px; }
+        @media (max-width: 900px) { .kv { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 520px) { .kv { grid-template-columns: 1fr; } }
+        .metric { background:var(--bg-tertiary); border:1px solid var(--border); border-radius:6px; padding:12px; }
+        .metric .label { color:var(--text-muted); font-size:12px; }
+        .metric .value { color:var(--text-primary); font-family:var(--font-mono); font-size:16px; word-break:break-all; }
+        .output { min-height:360px; max-height:680px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header class="header">
+        <h1>OpenAI Responses API 测试</h1>
+        <p class="subtitle">独立 HTTP 接口测试，不占用 OpenAI Realtime WebSocket 四协程链路</p>
+        <div class="nav" style="margin-top:8px;">
+            <a href="/web/" target="_blank" rel="noopener noreferrer">WS 测试面板</a>
+            <a href="/web/diagnostics.html" target="_blank" rel="noopener noreferrer">诊断看板</a>
+            <a href="/web/azure.html" target="_blank" rel="noopener noreferrer">Azure 监控</a>
+        </div>
+    </header>
+
+    <section class="panel">
+        <h2>配置状态</h2>
+        <div class="kv">
+            <div class="metric"><div class="label">启用状态</div><div class="value" id="s-enabled">-</div></div>
+            <div class="metric"><div class="label">默认模型</div><div class="value" id="s-model">-</div></div>
+            <div class="metric"><div class="label">Endpoint</div><div class="value" id="s-endpoint">-</div></div>
+            <div class="metric"><div class="label">API Key</div><div class="value" id="s-key">-</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>鉴权</h2>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="user-id">用户 ID</label>
+                <input type="text" id="user-id" value="1001">
+            </div>
+            <div class="form-group">
+                <label for="token">JWT Token</label>
+                <input type="text" id="token" placeholder="留空可自动获取">
+            </div>
+        </div>
+        <div class="btn-group">
+            <button class="btn btn-sm" id="btn-token">自动获取 Token</button>
+            <button class="btn btn-sm" id="btn-refresh">刷新配置</button>
+        </div>
+    </section>
+
+    <div class="grid">
+        <section class="panel">
+            <h2>普通问题</h2>
+            <div class="form-group">
+                <label for="question">用户问题</label>
+                <input type="text" id="question" value="请用三句话解释 Responses API 和 Chat Completions 的区别。">
+            </div>
+            <div class="btn-group" style="margin-top:12px;">
+                <button class="btn btn-primary" id="btn-send-question">发送普通问题</button>
+            </div>
+        </section>
+
+        <section class="panel">
+            <h2>高级 JSON 请求</h2>
+            <div class="form-group">
+                <label for="request-json">请求体</label>
+                <textarea id="request-json" rows="14"></textarea>
+            </div>
+            <div class="btn-group" style="margin-top:12px;">
+                <button class="btn btn-warning" id="btn-send-json">发送 JSON</button>
+                <button class="btn btn-sm" id="btn-template">填充模板</button>
+            </div>
+        </section>
+    </div>
+
+    <section class="panel">
+        <h2>响应结果</h2>
+        <pre class="response-output output" id="response-output">等待请求</pre>
+    </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+document.addEventListener('DOMContentLoaded', () => {
+    $('btn-token').addEventListener('click', generateToken);
+    $('btn-refresh').addEventListener('click', refreshStatus);
+    $('btn-send-question').addEventListener('click', sendQuestion);
+    $('btn-send-json').addEventListener('click', sendJSON);
+    $('btn-template').addEventListener('click', fillTemplate);
+    fillTemplate();
+    refreshStatus();
+});
+
+async function refreshStatus() {
+    try {
+        const data = await fetchJSON('/api/openai/responses/status');
+        const status = data.data || {};
+        $('s-enabled').textContent = status.enabled ? '已启用' : '已关闭';
+        $('s-model').textContent = status.default_model || '-';
+        $('s-endpoint').textContent = status.endpoint || '-';
+        $('s-key').textContent = status.api_key_configured ? '已配置' : '缺失';
+    } catch (err) {
+        $('response-output').textContent = '刷新配置失败：' + err.message;
+    }
+}
+
+async function generateToken() {
+    const userId = $('user-id').value || '1001';
+    const data = await fetchJSON('/test/generate-token?userId=' + encodeURIComponent(userId));
+    $('token').value = data.token || '';
+}
+
+function fillTemplate() {
+    $('request-json').value = JSON.stringify({
+        input: '请用三句话解释 Responses API 和 Chat Completions 的区别。'
+    }, null, 2);
+}
+
+async function sendQuestion() {
+    const question = $('question').value.trim();
+    if (!question) {
+        $('response-output').textContent = '用户问题不能为空';
+        return;
+    }
+    await sendPayload({ input: question });
+}
+
+async function sendJSON() {
+    try {
+        await sendPayload(JSON.parse($('request-json').value));
+    } catch (err) {
+        $('response-output').textContent = 'JSON 格式错误：' + err.message;
+    }
+}
+
+async function sendPayload(payload) {
+    if (!$('token').value) {
+        await generateToken();
+    }
+    $('response-output').textContent = '请求中...';
+    try {
+        const data = await fetchJSON('/api/openai/responses', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + $('token').value
+            },
+            body: JSON.stringify(payload)
+        });
+        const result = data.data || {};
+        $('response-output').textContent = [
+            '【聚合文本】',
+            result.output_text || '(无文本输出)',
+            '',
+            '【完整 JSON】',
+            JSON.stringify(data, null, 2)
+        ].join('\n');
+    } catch (err) {
+        $('response-output').textContent = '请求失败：' + err.message;
+    }
+}
+
+async function fetchJSON(url, options) {
+    const resp = await fetch(url, Object.assign({ cache: 'no-store' }, options || {}));
+    const text = await resp.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!resp.ok) {
+        throw new Error(data.error || data.message || 'HTTP ' + resp.status);
+    }
+    return data;
+}
+</script>
+</body>
+</html>

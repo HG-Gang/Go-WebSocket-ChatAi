@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TozoAI Redis 监控面板</title>
+    <!-- Layui 样式资源 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.21/dist/css/layui.css">
+    <style>
+        body { background: #f2f2f2; padding: 15px; }
+        .header-bar {
+            background: #fff; padding: 15px 20px; margin-bottom: 15px;
+            border-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,.05);
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .header-bar h2 { margin: 0; font-size: 20px; color: #333; }
+        .header-bar .subtitle { color: #999; font-size: 13px; margin-left: 12px; }
+        .stats-bar {
+            display: flex; gap: 20px; margin-bottom: 15px; flex-wrap: wrap;
+        }
+        .stat-card {
+            background: #fff; padding: 12px 20px; border-radius: 4px;
+            box-shadow: 0 1px 2px rgba(0,0,0,.05); flex: 1 1 150px; text-align: center;
+        }
+        .stat-card .num { font-size: 28px; font-weight: 600; color: #1E9FFF; }
+        .stat-card .label { font-size: 12px; color: #999; margin-top: 4px; }
+        .table-wrap {
+            background: #fff; padding: 15px; border-radius: 4px;
+            box-shadow: 0 1px 2px rgba(0,0,0,.05);
+        }
+        .toolbar { margin-bottom: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        /* JSON 值展示 */
+        .json-value {
+            max-height: 620px; overflow-y: auto;
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+            font-size: 12px; white-space: pre-wrap; word-break: break-all;
+            background: #f8f8f8; padding: 6px 8px; border-radius: 3px; border: 1px solid #e8e8e8;
+        }
+        .type-badge {
+            display: inline-block; padding: 2px 8px; border-radius: 3px;
+            font-size: 12px; color: #fff; font-weight: 500;
+        }
+        .type-string { background: #5FB878; }
+        .type-hash   { background: #1E9FFF; }
+        .type-list   { background: #FFB800; }
+        .type-set    { background: #FF5722; }
+        .type-zset   { background: #a233c6; }
+        .type-unknown { background: #999; }
+        .ttl-expire { color: #FF5722; font-weight: 600; }
+        .ttl-persist { color: #5FB878; }
+        .auto-refresh-indicator {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+            margin-right: 4px; vertical-align: middle;
+        }
+        .auto-refresh-indicator.on  { background: #5FB878; animation: blink 1s infinite; }
+        .auto-refresh-indicator.off { background: #ccc; }
+        @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+        .nav-link { margin-left: 15px; }
+        .key-desc { font-size: 12px; color:#666; line-height:1.5; }
+    </style>
+</head>
+<body>
+
+<!-- 顶部 -->
+<div class="header-bar">
+    <div style="display:flex;align-items:baseline;">
+        <h2>Redis 监控面板</h2>
+        <span class="subtitle">实时查看 Redis 中所有 Key 数据</span>
+    </div>
+    <div>
+        <a href="/web/" class="layui-btn layui-btn-sm layui-btn-primary nav-link">WS 测试面板</a>
+        <a href="/web/audio.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">语音测试</a>
+        <a href="/web/diagnostics.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">诊断看板</a>
+        <a href="/web/responses.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">Responses 测试</a>
+        <a href="/web/azure.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">Azure 监控</a>
+    </div>
+</div>
+
+<!-- 统计卡片 -->
+<div class="stats-bar">
+    <div class="stat-card">
+        <div class="num" id="stat-total">0</div>
+        <div class="label">Key 总数</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-string">0</div>
+        <div class="label">String</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-hash">0</div>
+        <div class="label">Hash</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-other">0</div>
+        <div class="label">List/Set/ZSet</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-last-update">-</div>
+        <div class="label">最后刷新</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-session">0</div>
+        <div class="label">Session Key</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-billing">0</div>
+        <div class="label">Billing/Usage</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-rate">0</div>
+        <div class="label">Rate Limit</div>
+    </div>
+    <div class="stat-card">
+        <div class="num" id="stat-openai">0</div>
+        <div class="label">OpenAI/Realtime</div>
+    </div>
+</div>
+
+<!-- 表格区 -->
+<div class="table-wrap">
+    <div class="toolbar">
+        <div class="layui-input-inline" style="width:250px;">
+            <input type="text" id="filter-pattern" value="*" placeholder="匹配模式（如 session:*）"
+                   class="layui-input layui-input-sm">
+        </div>
+        <button class="layui-btn layui-btn-sm" id="btn-refresh">
+            <i class="layui-icon layui-icon-refresh"></i> 刷新
+        </button>
+        <div class="layui-input-inline" style="width:120px;">
+            <select id="auto-interval" class="layui-input layui-input-sm">
+                <option value="0">关闭自动刷新</option>
+                <option value="3" selected>3 秒</option>
+                <option value="5">5 秒</option>
+                <option value="10">10 秒</option>
+                <option value="30">30 秒</option>
+            </select>
+        </div>
+        <span id="auto-status">
+            <span class="auto-refresh-indicator on"></span> 自动刷新中 (<span id="auto-countdown">3</span>s)
+        </span>
+    </div>
+
+    <table id="redis-table" lay-filter="redisTable"></table>
+</div>
+
+<!-- Layui 脚本资源 -->
+<script src="https://cdn.jsdelivr.net/npm/layui@2.9.21/dist/layui.js"></script>
+<script>
+/**
+ * TozoAI Redis 监控面板
+ * 功能：
+ *   1. 定时轮询 /api/redis/keys 接口获取 Redis 所有 key 数据
+ *   2. 使用 Layui table 展示（key / type / ttl / value）
+ *   3. value 以 JSON 格式展示
+ *   4. 支持自定义匹配模式和自动刷新间隔
+ */
+
+// 全局状态
+let autoTimer = null;
+let countdown = 3;
+let allData = [];
+
+layui.use(['table', 'form'], function() {
+    const table = layui.table;
+    const $ = layui.$;
+
+    // 初始化表格
+    table.render({
+        elem: '#redis-table',
+        cols: [[
+            { field: 'key',   title: 'Key',  width: 320, sort: true, templet: function(d) {
+                return '<span style="font-family:monospace;font-size:13px;word-break:break-all;">' + escapeHtml(d.key) + '</span>';
+            }},
+            { field: 'type',  title: '类型', width: 90, align: 'center', sort: true, templet: function(d) {
+                const cls = 'type-' + (d.type || 'unknown');
+                return '<span class="type-badge ' + cls + '">' + (d.type || '-') + '</span>';
+            }},
+            { field: 'ttl',   title: 'TTL',  width: 100, align: 'center', sort: true, templet: function(d) {
+                if (d.ttl === -1) return '<span class="ttl-persist">永不过期</span>';
+                if (d.ttl === -2) return '<span class="ttl-expire">已过期</span>';
+                return formatTTL(d.ttl);
+            }},
+            { field: 'category', title: 'Key 作用', width: 150, sort: true, templet: function(d) {
+                return '<b>' + escapeHtml(d.category || 'other') + '</b>';
+            }},
+            { field: 'description', title: '作用解释', minWidth: 260, templet: function(d) {
+                return '<div class="key-desc">' + escapeHtml(d.description || '-') + '</div>';
+            }},
+            { field: 'value', title: '完整值（JSON）', minWidth: 520, templet: function(d) {
+                let val = d.value;
+                let display;
+                if (typeof val === 'object' && val !== null) {
+                    display = JSON.stringify(val, null, 2);
+                } else {
+                    display = String(val);
+                }
+                return '<div class="json-value">' + escapeHtml(display) + '</div>';
+            }}
+        ]],
+        data: [],
+        page: false,
+        skin: 'line',
+        even: true,
+        size: 'sm',
+        text: { none: '暂无 Redis 数据，请确保 Go 服务和 Redis 已启动' }
+    });
+
+    // 刷新数据
+    function refreshData() {
+        const pattern = $('#filter-pattern').val() || '*';
+        const apiUrl = '/api/redis/keys?pattern=' + encodeURIComponent(pattern) + '&count=1000&full=1';
+
+        $.ajax({
+            url: apiUrl,
+            type: 'GET',
+            dataType: 'json',
+            timeout: 5000,
+            success: function(res) {
+                if (res.code !== 200) {
+                    layui.layer.msg('获取失败: ' + (res.error || '未知错误'), {icon: 2});
+                    return;
+                }
+
+                allData = res.data || [];
+
+                // 渲染表格
+                table.render({
+                    elem: '#redis-table',
+                    cols: [[
+                        { field: 'key',   title: 'Key',  width: 320, sort: true, templet: function(d) {
+                            return '<span style="font-family:monospace;font-size:13px;word-break:break-all;">' + escapeHtml(d.key) + '</span>';
+                        }},
+                        { field: 'type',  title: '类型', width: 90, align: 'center', sort: true, templet: function(d) {
+                            const cls = 'type-' + (d.type || 'unknown');
+                            return '<span class="type-badge ' + cls + '">' + (d.type || '-') + '</span>';
+                        }},
+                        { field: 'ttl',   title: 'TTL',  width: 100, align: 'center', sort: true, templet: function(d) {
+                            if (d.ttl === -1) return '<span class="ttl-persist">永不过期</span>';
+                            if (d.ttl === -2) return '<span class="ttl-expire">已过期</span>';
+                            return formatTTL(d.ttl);
+                        }},
+                        { field: 'category', title: 'Key 作用', width: 150, sort: true, templet: function(d) {
+                            return '<b>' + escapeHtml(d.category || 'other') + '</b>';
+                        }},
+                        { field: 'description', title: '作用解释', minWidth: 260, templet: function(d) {
+                            return '<div class="key-desc">' + escapeHtml(d.description || '-') + '</div>';
+                        }},
+                        { field: 'value', title: '完整值（JSON）', minWidth: 520, templet: function(d) {
+                            let val = d.value;
+                            let display;
+                            if (typeof val === 'object' && val !== null) {
+                                display = JSON.stringify(val, null, 2);
+                            } else {
+                                display = String(val);
+                            }
+                            return '<div class="json-value">' + escapeHtml(display) + '</div>';
+                        }}
+                    ]],
+                    data: allData,
+                    page: false,
+                    skin: 'line',
+                    even: true,
+                    size: 'sm',
+                    text: { none: '暂无 Redis 数据' }
+                });
+
+                // 更新统计
+                updateStats(allData);
+            },
+            error: function(xhr, status, error) {
+                console.error('Redis API 请求失败:', status, error);
+            }
+        });
+    }
+
+    // 更新统计卡片
+    function updateStats(data) {
+        let stringCount = 0, hashCount = 0, otherCount = 0;
+        let sessionCount = 0, billingCount = 0, rateCount = 0, openaiCount = 0;
+        data.forEach(function(item) {
+            switch (item.type) {
+                case 'string': stringCount++; break;
+                case 'hash':   hashCount++;   break;
+                default:       otherCount++;  break;
+            }
+            const category = item.category || '';
+            if (category === 'session') {
+                sessionCount++;
+            } else if (category === 'billing') {
+                billingCount++;
+            } else if (category === 'rate_limit') {
+                rateCount++;
+            } else if (category === 'openai') {
+                openaiCount++;
+            }
+        });
+        $('#stat-total').text(data.length);
+        $('#stat-string').text(stringCount);
+        $('#stat-hash').text(hashCount);
+        $('#stat-other').text(otherCount);
+        $('#stat-session').text(sessionCount);
+        $('#stat-billing').text(billingCount);
+        $('#stat-rate').text(rateCount);
+        $('#stat-openai').text(openaiCount);
+        $('#stat-last-update').text(new Date().toLocaleTimeString());
+    }
+
+    // 手动刷新
+    $('#btn-refresh').on('click', function() {
+        refreshData();
+        layui.layer.msg('已刷新', {icon: 1, time: 800});
+    });
+
+    // 自动刷新控制
+    function startAutoRefresh() {
+        stopAutoRefresh();
+        const interval = parseInt($('#auto-interval').val());
+        if (interval <= 0) {
+            $('#auto-status').html('<span class="auto-refresh-indicator off"></span> 自动刷新已关闭');
+            return;
+        }
+        countdown = interval;
+        updateCountdown();
+        autoTimer = setInterval(function() {
+            countdown--;
+            if (countdown <= 0) {
+                refreshData();
+                countdown = interval;
+            }
+            updateCountdown();
+        }, 1000);
+    }
+
+    function stopAutoRefresh() {
+        if (autoTimer) {
+            clearInterval(autoTimer);
+            autoTimer = null;
+        }
+    }
+
+    function updateCountdown() {
+        const interval = parseInt($('#auto-interval').val());
+        if (interval <= 0) {
+            $('#auto-status').html('<span class="auto-refresh-indicator off"></span> 自动刷新已关闭');
+        } else {
+            $('#auto-status').html(
+                '<span class="auto-refresh-indicator on"></span> 自动刷新中 (<span id="auto-countdown">' + countdown + '</span>s)'
+            );
+        }
+    }
+
+    $('#auto-interval').on('change', function() {
+        startAutoRefresh();
+    });
+
+    // 初始加载
+    refreshData();
+    startAutoRefresh();
+});
+
+// 工具函数
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatTTL(seconds) {
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return h + 'h ' + m + 'm';
+}
+</script>
+
+</body>
+</html>

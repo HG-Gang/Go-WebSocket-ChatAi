@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TozoAI 诊断看板</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        .container { max-width: 1440px; }
+        .nav a { color: var(--accent-blue); text-decoration: none; margin: 0 8px; font-size: 13px; }
+        .toolbar-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+        .toolbar-row select { width:auto; min-width:120px; }
+        .section-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:20px; }
+        @media (max-width: 980px) { .section-grid { grid-template-columns: 1fr; } }
+        .metric-grid { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:12px; }
+        @media (max-width: 900px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 520px) { .metric-grid { grid-template-columns: 1fr; } }
+        .metric {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px;
+            min-height: 72px;
+        }
+        .metric .label { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+        .metric .value { color: var(--text-primary); font-family: var(--font-mono); font-size: 17px; margin-top: 4px; word-break: break-all; }
+        .metric .sub { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+        .table-lite { width:100%; border-collapse: collapse; font-size: 13px; }
+        .table-lite th, .table-lite td { border-bottom:1px solid var(--border); padding:8px; text-align:left; vertical-align:top; }
+        .table-lite th { color: var(--text-secondary); font-weight:600; }
+        .badge { display:inline-block; padding:2px 8px; border-radius: 999px; font-size: 12px; border:1px solid var(--border); color: var(--text-secondary); }
+        .badge.ok { color: var(--accent-green); border-color: rgba(63,185,80,.5); }
+        .badge.warn { color: var(--accent-yellow); border-color: rgba(210,153,34,.5); }
+        .badge.err { color: var(--accent-red); border-color: rgba(248,81,73,.5); }
+        .progress { height:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:999px; overflow:hidden; margin-top:8px; }
+        .progress span { display:block; height:100%; width:0; background:var(--accent-green); transition: width .2s; }
+        .json-box {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            max-height: 360px;
+            overflow: auto;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+        }
+        .check-list { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px 14px; font-size:13px; color:var(--text-secondary); }
+        @media (max-width: 760px) { .check-list { grid-template-columns: 1fr; } }
+        .check-list span::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--accent-blue); margin-right:8px; }
+        .session-table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+        .session-table-wrap .table-lite th { position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; }
+        .mono-cell { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header class="header">
+        <h1>TozoAI 诊断看板</h1>
+        <p class="subtitle">App / Go / Redis / OpenAI Realtime 运行状态聚合</p>
+        <div class="nav" style="margin-top:8px;">
+            <a href="/web/">WS 消息测试</a>
+            <a href="/web/audio.html" target="_blank" rel="noopener noreferrer">语音对话测试</a>
+            <a href="/web/redis.html" target="_blank" rel="noopener noreferrer">Redis 监控</a>
+            <a href="/web/responses.html" target="_blank" rel="noopener noreferrer">Responses 测试</a>
+            <a href="/web/azure.html" target="_blank" rel="noopener noreferrer">Azure 监控</a>
+        </div>
+    </header>
+
+    <section class="panel">
+        <h2>刷新控制</h2>
+        <div class="toolbar-row">
+            <button class="btn btn-primary" id="btn-refresh">刷新</button>
+            <select id="auto-refresh">
+                <option value="0">关闭自动刷新</option>
+                <option value="3" selected>3 秒</option>
+                <option value="5">5 秒</option>
+                <option value="10">10 秒</option>
+            </select>
+            <span class="badge" id="refresh-status">等待刷新</span>
+            <span class="hint" id="last-refresh" style="margin:0;">-</span>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Web 调试页能力清单</h2>
+        <table class="table-lite">
+            <thead>
+            <tr><th>页面</th><th>当前可显示</th><th>当前可操作</th><th>适合定位的问题</th></tr>
+            </thead>
+            <tbody>
+            <tr>
+                <td>WS 消息测试</td>
+                <td>连接状态、会话 ID、Ping/Pong、收发计数、响应耗时、文本/音频/转写统计、错误与重连信号</td>
+                <td>生成 token、连接/断开、手动重连、发送 OpenAI 原生事件、发送快捷文本、应用层 ping</td>
+                <td>App→Go→OpenAI 消息转发、长连接心跳、response.create 状态机、流式下行</td>
+            </tr>
+            <tr>
+                <td>语音对话测试</td>
+                <td>AudioContext、麦克风、WS、session、播放队列、采样率、发送帧数、接收音频包、聊天文本、日志</td>
+                <td>初始化音频、麦克风测试、连接 WS、session.update、按住录音、发送文本、播放 OpenAI 音频</td>
+                <td>耳机/浏览器音频链路、PCM16/base64、OpenAI 音频 delta、播放卡顿</td>
+            </tr>
+            <tr>
+                <td>Redis 监控</td>
+                <td>Key、类型、TTL、值预览、String/Hash/其他类型统计、最后刷新时间</td>
+                <td>按 pattern 扫描、手动刷新、自动刷新</td>
+                <td>session、billing、rate limit、上下文恢复数据是否正常写入</td>
+            </tr>
+            <tr>
+                <td>诊断看板</td>
+                <td>Go runtime、内存、GC、容量、功能开关、Redis 连接池、OpenAI Realtime 配置、Redis key 分类</td>
+                <td>统一刷新、自动轮询、查看原始诊断 JSON</td>
+                <td>服务端压力、配置错误、Redis 不可用、OpenAI 重连参数不合理</td>
+            </tr>
+            <tr>
+                <td>Responses 测试</td>
+                <td>OpenAI Responses API 启用状态、模型、Endpoint、API Key 状态、完整响应 JSON</td>
+                <td>生成 token、发送普通问题、发送高级 JSON 请求</td>
+                <td>Responses API HTTP 调用、普通问答、非 WebSocket 链路、响应聚合</td>
+            </tr>
+            <tr>
+                <td>Azure 监控</td>
+                <td>Azure Endpoint、API Version、Deployment、Realtime 心跳与重连、代理状态</td>
+                <td>刷新配置、复制原始 Azure 诊断 JSON</td>
+                <td>Azure OpenAI 接入前配置核对、模块就绪度、代理链路检查</td>
+            </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section class="panel">
+        <h2>Go 运行状态</h2>
+        <div class="metric-grid">
+            <div class="metric"><div class="label">健康状态</div><div class="value" id="m-health">-</div><div class="sub" id="m-health-time">-</div></div>
+            <div class="metric"><div class="label">运行时长</div><div class="value" id="m-uptime">-</div><div class="sub" id="m-go-version">-</div></div>
+            <div class="metric"><div class="label">协程数</div><div class="value" id="m-goroutines">-</div><div class="sub" id="m-cpu">-</div></div>
+            <div class="metric"><div class="label">活跃会话</div><div class="value" id="m-active">-</div><div class="sub" id="m-capacity-text">-</div><div class="progress"><span id="m-capacity-bar"></span></div></div>
+            <div class="metric"><div class="label">内存 Alloc</div><div class="value" id="m-alloc">-</div><div class="sub">当前对象占用</div></div>
+            <div class="metric"><div class="label">Heap Inuse</div><div class="value" id="m-heap">-</div><div class="sub">堆使用中</div></div>
+            <div class="metric"><div class="label">Sys</div><div class="value" id="m-sys">-</div><div class="sub">Go 向系统申请</div></div>
+            <div class="metric"><div class="label">GC</div><div class="value" id="m-gc">-</div><div class="sub" id="m-gc-pause">-</div></div>
+        </div>
+    </section>
+
+    <div class="section-grid">
+        <section class="panel">
+            <h2>功能开关</h2>
+            <div class="metric-grid">
+                <div class="metric"><div class="label">JWT</div><div class="value" id="f-jwt">-</div></div>
+                <div class="metric"><div class="label">Rate Limit</div><div class="value" id="f-rate">-</div></div>
+                <div class="metric"><div class="label">Billing</div><div class="value" id="f-billing">-</div></div>
+                <div class="metric"><div class="label">Fallback</div><div class="value" id="f-fallback">-</div></div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <h2>网络代理</h2>
+            <div class="metric-grid">
+                <div class="metric"><div class="label">OpenAI 代理</div><div class="value" id="n-openai">-</div><div class="sub">wss/https 使用 HTTPS_PROXY</div></div>
+                <div class="metric"><div class="label">HTTP_PROXY</div><div class="value" id="n-http">-</div></div>
+                <div class="metric"><div class="label">HTTPS_PROXY</div><div class="value" id="n-https">-</div></div>
+                <div class="metric"><div class="label">NO_PROXY</div><div class="value" id="n-no">-</div></div>
+            </div>
+        </section>
+    </div>
+
+    <div class="section-grid">
+        <section class="panel">
+            <h2>Redis 状态</h2>
+            <div class="metric-grid">
+                <div class="metric"><div class="label">可用性</div><div class="value" id="r-available">-</div><div class="sub" id="r-addr">-</div></div>
+                <div class="metric"><div class="label">Ping</div><div class="value" id="r-ping">-</div><div class="sub" id="r-error">-</div></div>
+                <div class="metric"><div class="label">连接池</div><div class="value" id="r-pool">-</div><div class="sub" id="r-idle">-</div></div>
+                <div class="metric"><div class="label">命中/等待</div><div class="value" id="r-hit">-</div><div class="sub" id="r-wait">-</div></div>
+            </div>
+        </section>
+    </div>
+
+    <section class="panel">
+        <h2>OpenAI Realtime 配置</h2>
+        <div class="metric-grid">
+            <div class="metric"><div class="label">模型</div><div class="value" id="o-model">-</div><div class="sub" id="o-enabled">-</div></div>
+            <div class="metric"><div class="label">WS URL</div><div class="value" id="o-ws">-</div><div class="sub" id="o-endpoint">-</div></div>
+            <div class="metric"><div class="label">Voice</div><div class="value" id="o-voice">-</div><div class="sub" id="o-key">-</div></div>
+            <div class="metric"><div class="label">4 协程链路</div><div class="value">读 App / 写 OpenAI / 读 OpenAI / 写 App</div><div class="sub">单写者模型降低并发写冲突</div></div>
+            <div class="metric"><div class="label">App 心跳</div><div class="value" id="o-app-heartbeat">-</div><div class="sub">Go→App Ping / 等待 Pong</div></div>
+            <div class="metric"><div class="label">OpenAI 超时</div><div class="value" id="o-api-timeout">-</div><div class="sub">读超时 / 写超时</div></div>
+            <div class="metric"><div class="label">OpenAI 重连</div><div class="value" id="o-reconnect">-</div><div class="sub">最大次数 / 延迟</div></div>
+            <div class="metric"><div class="label">恢复策略</div><div class="value" id="o-restore">-</div><div class="sub">session.update + 最近上下文</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>OpenAI Responses API 配置</h2>
+        <div class="metric-grid">
+            <div class="metric"><div class="label">启用状态</div><div class="value" id="resp-enabled">-</div><div class="sub" id="resp-key">-</div></div>
+            <div class="metric"><div class="label">默认模型</div><div class="value" id="resp-model">-</div><div class="sub">独立于 OpenAI Realtime</div></div>
+            <div class="metric"><div class="label">HTTP Endpoint</div><div class="value" id="resp-endpoint">-</div><div class="sub" id="resp-route">-</div></div>
+            <div class="metric"><div class="label">超时 / 存储</div><div class="value" id="resp-timeout">-</div><div class="sub" id="resp-store">-</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Azure OpenAI 监控</h2>
+        <p class="hint">这里展示 Azure OpenAI Realtime 与 HTTP 代理接口的配置状态；Chat、Completions、图片、TTS、STT、TST 已有本地路由，实际可用性取决于 endpoint、api-version、deployment 和 API Key。</p>
+        <div class="metric-grid">
+            <div class="metric"><div class="label">启用状态</div><div class="value" id="az-enabled">-</div><div class="sub" id="az-key">-</div></div>
+            <div class="metric"><div class="label">Endpoint</div><div class="value" id="az-endpoint">-</div><div class="sub" id="az-api-version">-</div></div>
+            <div class="metric"><div class="label">Realtime</div><div class="value" id="az-realtime">-</div><div class="sub" id="az-realtime-ws">-</div></div>
+            <div class="metric"><div class="label">Chat</div><div class="value" id="az-chat">-</div><div class="sub">普通聊天 / chat completions</div></div>
+            <div class="metric"><div class="label">Image</div><div class="value" id="az-image">-</div><div class="sub">文生图 / 图生图</div></div>
+            <div class="metric"><div class="label">TTS</div><div class="value" id="az-tts">-</div><div class="sub">文字转语音</div></div>
+            <div class="metric"><div class="label">STT</div><div class="value" id="az-stt">-</div><div class="sub">语音转文字</div></div>
+            <div class="metric"><div class="label">TST</div><div class="value" id="az-tst">-</div><div class="sub">语音到语音/翻译类预留</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Redis Key 分类统计</h2>
+        <div class="metric-grid">
+            <div class="metric"><div class="label">扫描数量</div><div class="value" id="k-total">-</div><div class="sub" id="k-cursor">-</div></div>
+            <div class="metric"><div class="label">Session</div><div class="value" id="k-session">-</div><div class="sub">session:* / openai:session:*</div></div>
+            <div class="metric"><div class="label">Billing</div><div class="value" id="k-billing">-</div><div class="sub">billing:* / usage:*</div></div>
+            <div class="metric"><div class="label">Rate Limit</div><div class="value" id="k-rate">-</div><div class="sub">rate:* / limit:*</div></div>
+            <div class="metric"><div class="label">OpenAI</div><div class="value" id="k-openai">-</div><div class="sub">openai:* / realtime:*</div></div>
+            <div class="metric"><div class="label">永久 Key</div><div class="value" id="k-persist">-</div><div class="sub">TTL = -1</div></div>
+            <div class="metric"><div class="label">带过期 Key</div><div class="value" id="k-expiring">-</div><div class="sub">TTL > 0</div></div>
+            <div class="metric"><div class="label">其他</div><div class="value" id="k-other">-</div><div class="sub" id="k-error">-</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>链路统计（已接入）</h2>
+        <div class="metric-grid">
+            <div class="metric"><div class="label">App 连接</div><div class="value" id="ma-connections">-</div><div class="sub" id="ma-disconnects">-</div></div>
+            <div class="metric"><div class="label">App 消息</div><div class="value" id="ma-messages">-</div><div class="sub" id="ma-types">-</div></div>
+            <div class="metric"><div class="label">App 字节</div><div class="value" id="ma-bytes">-</div><div class="sub">in / out</div></div>
+            <div class="metric"><div class="label">App 心跳</div><div class="value" id="ma-heartbeat">-</div><div class="sub" id="ma-pong-latency">-</div></div>
+            <div class="metric"><div class="label">Go 队列</div><div class="value" id="mg-queue">-</div><div class="sub">sendChan / apiSendChan</div></div>
+            <div class="metric"><div class="label">Go 压力</div><div class="value" id="mg-pressure">-</div><div class="sub">容量拒绝 / 慢消费者</div></div>
+            <div class="metric"><div class="label">OpenAI 连接</div><div class="value" id="mo-connect">-</div><div class="sub">成功 / 失败</div></div>
+            <div class="metric"><div class="label">OpenAI 重连</div><div class="value" id="mo-reconnect">-</div><div class="sub" id="mo-reconnect-reasons">-</div></div>
+            <div class="metric"><div class="label">OpenAI 事件</div><div class="value" id="mo-events">-</div><div class="sub">App→OpenAI / OpenAI→App</div></div>
+            <div class="metric"><div class="label">OpenAI 响应</div><div class="value" id="mo-responses">-</div><div class="sub" id="mo-response-status">-</div></div>
+            <div class="metric"><div class="label">OpenAI 流式</div><div class="value" id="mo-stream">-</div><div class="sub">text / transcript / audio</div></div>
+            <div class="metric"><div class="label">OpenAI 延迟</div><div class="value" id="mo-latency">-</div><div class="sub">首包 / 完整响应平均</div></div>
+            <div class="metric"><div class="label">业务 Token</div><div class="value" id="mb-tokens">-</div><div class="sub" id="mb-token-maps">-</div></div>
+            <div class="metric"><div class="label">业务音频</div><div class="value" id="mb-audio">-</div><div class="sub">输入 / 输出估算时长</div></div>
+            <div class="metric"><div class="label">错误</div><div class="value" id="me-total">-</div><div class="sub" id="me-recent">-</div></div>
+            <div class="metric"><div class="label">实例指标</div><div class="value" id="mi-ratio">-</div><div class="sub">goroutine/连接 与 内存/连接</div></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>最近会话明细</h2>
+        <div class="session-table-wrap">
+            <table class="table-lite">
+                <thead>
+                <tr>
+                    <th>Session</th>
+                    <th>用户 / 设备</th>
+                    <th>状态</th>
+                    <th>App</th>
+                    <th>OpenAI</th>
+                    <th>队列</th>
+                    <th>最近事件</th>
+                    <th>完整响应摘要</th>
+                </tr>
+                </thead>
+                <tbody id="metrics-session-body">
+                <tr><td colspan="8">暂无会话</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>已实现统计说明</h2>
+        <div class="check-list">
+            <span>App 维度：用户 ID、设备 ID、连接来源、在线时长、主动断开/异常断开原因</span>
+            <span>App→Go：消息类型分布、音频帧大小、上行/下行字节、JSON 解析错误</span>
+            <span>Go 会话：4 协程模型标记、sendChan 长度、apiSendChan 长度、慢消费者次数</span>
+            <span>Go 心跳：Ping 发送次数、Pong 次数、Pong 延迟、心跳超时次数、断链原因分布</span>
+            <span>OpenAI：session 事件、response.created/response.done、response 状态分布</span>
+            <span>OpenAI 流式：text delta 字符、transcript 字符、audio delta 包数/字节、首包延迟、完整响应耗时</span>
+            <span>OpenAI 重连：重连原因、重试次数、恢复 session 成功率、恢复 history 条数</span>
+            <span>错误：OpenAI error.code、网络 read/write timeout、鉴权失败、限流拒绝、Redis/账单错误</span>
+            <span>容量：实例活跃连接、goroutine/连接比例、内存/连接比例、GC 暂停</span>
+            <span>业务：token 使用量、语音输入/输出时长、用户/模型/日期维度用量、账单异常</span>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>原始诊断 JSON</h2>
+        <pre class="json-box" id="raw-json">-</pre>
+    </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let autoTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    $('btn-refresh').addEventListener('click', refreshAll);
+    $('auto-refresh').addEventListener('change', restartAutoRefresh);
+    refreshAll();
+    restartAutoRefresh();
+});
+
+function restartAutoRefresh() {
+    if (autoTimer) clearInterval(autoTimer);
+    const seconds = Number($('auto-refresh').value);
+    if (seconds > 0) {
+        autoTimer = setInterval(refreshAll, seconds * 1000);
+    }
+}
+
+async function refreshAll() {
+    setBadge('refresh-status', '刷新中', 'warn');
+    const result = { debug: null, health: null, redis: null };
+    await Promise.all([
+        fetchJSON('/api/debug/status').then(v => result.debug = v).catch(err => result.debug = { error: err.message }),
+        fetchJSON('/health').then(v => result.health = v).catch(err => result.health = { error: err.message }),
+        fetchJSON('/api/redis/keys?pattern=*&count=1000&full=1').then(v => result.redis = v).catch(err => result.redis = { error: err.message })
+    ]);
+    renderDebug(result.debug, result.health);
+    renderRedisKeys(result.redis);
+    $('raw-json').textContent = JSON.stringify(result, null, 2);
+    $('last-refresh').textContent = '最后刷新：' + new Date().toLocaleString();
+    setBadge('refresh-status', '已刷新', 'ok');
+}
+
+async function fetchJSON(url) {
+    const resp = await fetch(url, { cache: 'no-store' });
+    const text = await resp.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!resp.ok) {
+        throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+    return data;
+}
+
+function renderDebug(payload, health) {
+    const data = payload?.data || {};
+    const server = data.server || {};
+    const memory = data.memory || {};
+    const capacity = data.capacity || {};
+    const features = data.features || {};
+    const redis = data.redis || {};
+    const network = data.network || {};
+    const openai = data.openai || {};
+    const realtime = openai.realtime || {};
+    const responses = data.responses || {};
+    const azure = data.azure || {};
+    const azureRealtime = azure.realtime || {};
+    const metrics = data.metrics || {};
+
+    text('m-health', health?.status || payload?.error || '-');
+    text('m-health-time', health?.time ? new Date(health.time).toLocaleString() : '-');
+    text('m-uptime', server.uptime || '-');
+    text('m-go-version', `${server.go_version || '-'} ${server.os || ''}/${server.arch || ''}`);
+    text('m-goroutines', number(server.goroutines));
+    text('m-cpu', `${number(server.num_cpu)} CPU`);
+    text('m-active', number(capacity.active_sessions));
+    const max = Number(capacity.max_active_sessions || 0);
+    const active = Number(capacity.active_sessions || 0);
+    const pct = max > 0 ? Math.min(100, active / max * 100) : 0;
+    text('m-capacity-text', max > 0 ? `${active}/${max} (${pct.toFixed(1)}%)` : '未限制');
+    $('m-capacity-bar').style.width = `${pct}%`;
+    $('m-capacity-bar').style.background = pct >= 85 ? 'var(--accent-red)' : pct >= 65 ? 'var(--accent-yellow)' : 'var(--accent-green)';
+    text('m-alloc', mb(memory.alloc_mb));
+    text('m-heap', mb(memory.heap_alloc_mb));
+    text('m-sys', mb(memory.sys_mb));
+    text('m-gc', number(memory.num_gc));
+    text('m-gc-pause', `${ms(memory.gc_pause_total_ms)} 总暂停`);
+
+    renderSwitch('f-jwt', features.jwt_enabled);
+    renderSwitch('f-rate', features.rate_limit_enabled);
+    renderSwitch('f-billing', features.billing_enabled);
+    renderSwitch('f-fallback', features.fallback_enabled);
+
+    renderSwitch('n-openai', network.openai_proxy_enabled);
+    text('n-http', network.http_proxy || '-');
+    text('n-https', network.https_proxy || '-');
+    text('n-no', network.no_proxy || '-');
+
+    renderSwitch('r-available', redis.available && redis.ping_ok);
+    text('r-addr', `${redis.addr || '-'} db=${redis.db ?? '-'}`);
+    text('r-ping', redis.ping_ms >= 0 ? `${redis.ping_ms}ms` : '-');
+    text('r-error', redis.error || '正常');
+    text('r-pool', `${number(redis.pool?.total_conns)} 总连接`);
+    text('r-idle', `${number(redis.pool?.idle_conns)} 空闲 / ${number(redis.pool?.stale_conns)} 陈旧`);
+    text('r-hit', `${number(redis.pool?.hits)}/${number(redis.pool?.misses)}`);
+    text('r-wait', `${number(redis.pool?.wait_count)} 等待 / ${number(redis.pool?.timeouts)} 超时`);
+
+    text('o-model', openai.default_model || '-');
+    text('o-enabled', openai.enabled ? '已启用' : '已关闭');
+    text('o-ws', openai.ws_url || '-');
+    text('o-endpoint', openai.endpoint || '-');
+    text('o-voice', openai.voice || '-');
+    text('o-key', openai.api_key_configured ? 'API Key 已配置' : 'API Key 缺失');
+    text('o-app-heartbeat', `${realtime.app_ping_interval || '-'} / ${realtime.app_pong_timeout || '-'}`);
+    text('o-api-timeout', `${realtime.api_read_timeout || '-'} / ${realtime.api_write_timeout || '-'}`);
+    text('o-reconnect', `${number(realtime.reconnect_max_retries)} / ${realtime.reconnect_delay || '-'}`);
+    text('o-restore', `${realtime.restore_session ? '开启' : '关闭'} / ${number(realtime.restore_history_limit)} 条`);
+
+    renderSwitch('resp-enabled', responses.enabled);
+    text('resp-key', responses.api_key_configured ? 'API Key 已配置' : 'API Key 缺失');
+    text('resp-model', responses.default_model || '-');
+    text('resp-endpoint', responses.endpoint || '-');
+    text('resp-route', `${responses.route || '-'} -> ${responses.upstream_path || '-'}`);
+    text('resp-timeout', responses.timeout_ms ? `${responses.timeout_ms}ms` : '-');
+    text('resp-store', responses.store_default ? '默认保存响应' : '默认不保存响应');
+
+    renderSwitch('az-enabled', azure.enabled);
+    text('az-key', azure.api_key_configured ? 'API Key 已配置' : 'API Key 缺失');
+    text('az-endpoint', azure.endpoint || '-');
+    text('az-api-version', azure.api_version ? `api-version=${azure.api_version}` : 'api-version 未配置');
+    text('az-realtime', azure.realtime_deployment || azure.deployment_name || azure.default_model || '-');
+    text('az-realtime-ws', azureRealtime.ws_url || '-');
+    text('az-chat', azure.chat_deployment || azure.deployment_name || '-');
+    text('az-image', azure.image_deployment || '-');
+    text('az-tts', azure.tts_deployment || '-');
+    text('az-stt', azure.stt_deployment || '-');
+    text('az-tst', azure.tst_deployment || '-');
+
+    renderMetrics(metrics, server, memory, capacity);
+}
+
+// 渲染 Go 进程内 metrics.Snapshot() 输出的链路统计。
+// 这一块对应“建议继续接入的统计”的落地版：App、Go、OpenAI、业务、错误都在这里汇总。
+function renderMetrics(metrics, server, memory, capacity) {
+    const app = metrics.app || {};
+    const go = metrics.go || {};
+    const openai = metrics.openai || {};
+    const business = metrics.business || {};
+    const errors = metrics.errors || {};
+
+    text('ma-connections', `${number(app.connections_total)} 总连接 / ${number(capacity.active_sessions)} 活跃`);
+    text('ma-disconnects', `${number(app.disconnects_total)} 次断开，异常 ${number(app.abnormal_disconnects)} 次`);
+    text('ma-messages', `${number(app.messages_total)} 总消息 / ${number(app.text_messages)} 文本 / ${number(app.binary_messages)} 二进制`);
+    text('ma-types', topMap(app.message_types));
+    text('ma-bytes', `${byteSize(app.bytes_in)} / ${byteSize(app.bytes_out)}`);
+    text('ma-heartbeat', `${number(app.ping_sent)} ping / ${number(app.pong_received)} pong`);
+    text('ma-pong-latency', latencyText(app.pong_latency_ms));
+
+    text('mg-queue', `${number(go.last_send_queue_len)}/${number(go.last_send_queue_cap)} / ${number(go.last_api_send_queue_len)}/${number(go.last_api_send_queue_cap)}`);
+    text('mg-pressure', `${number(go.capacity_rejected)} 次拒绝 / ${number(app.slow_consumer_drops)} 次慢消费丢弃`);
+
+    text('mo-connect', `${number(openai.connect_attempts)} 次尝试 / ${number(openai.connect_success)} 次成功 / ${number(openai.connect_failures)} 次失败`);
+    text('mo-reconnect', `${number(openai.reconnect_requests)} 次请求 / ${number(openai.reconnect_success)} 次成功 / ${number(openai.reconnect_failures)} 次失败`);
+    text('mo-reconnect-reasons', topMap(openai.reconnect_reasons));
+    text('mo-events', `${number(openai.client_events_total)} 上行 / ${number(openai.server_events_total)} 下行`);
+    text('mo-responses', `${number(openai.response_created)} 已创建 / ${number(openai.response_done)} 已完成`);
+    text('mo-response-status', `完成 ${number(openai.response_completed)} / 取消 ${number(openai.response_cancelled)} / 失败 ${number(openai.response_failed)}`);
+    text('mo-stream', `${number(openai.text_delta_chars)} 文本字符 / ${number(openai.transcript_delta_chars)} 转写字符 / ${byteSize(openai.audio_delta_bytes)} 音频`);
+    text('mo-latency', `${latencyText(openai.first_delta_latency_ms)} / ${latencyText(openai.response_latency_ms)}`);
+
+    text('mb-tokens', `${number(business.input_tokens)} 输入 / ${number(business.output_tokens)} 输出 / ${number(business.total_tokens)} 总量`);
+    text('mb-token-maps', `用户 ${objectSize(business.tokens_by_user)} / 模型 ${objectSize(business.tokens_by_model)} / 日期 ${objectSize(business.tokens_by_day)}`);
+    text('mb-audio', `${durationMs(business.input_audio_ms)} / ${durationMs(business.output_audio_ms)}`);
+
+    text('me-total', number(errors.total));
+    text('me-recent', recentErrorText(errors.recent));
+
+    const active = Number(capacity.active_sessions || 0);
+    const goroutines = Number(server.goroutines || 0);
+    const allocMB = Number(memory.alloc_mb || 0);
+    text('mi-ratio', active > 0 ? `${(goroutines / active).toFixed(2)} 协程/会话 / ${(allocMB / active).toFixed(2)} MB/会话` : `${number(goroutines)} 协程 / 暂无活跃会话`);
+
+    renderRecentSessions(metrics.recent_sessions || []);
+}
+
+// 渲染最近会话明细，展示服务端真实 session.events 和 response 摘要。
+function renderRecentSessions(sessions) {
+    const tbody = $('metrics-session-body');
+    tbody.innerHTML = '';
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 8;
+        td.textContent = '暂无会话';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+    }
+
+    sessions.slice(0, 30).forEach(session => {
+        const tr = document.createElement('tr');
+        addCell(tr, `${session.session_id || '-'}\n${session.request_id || '-'}`, 'mono-cell');
+        addCell(tr, `${session.user_id || '-'}\n${session.device_id || '-'}\n${session.remote_addr || '-'}`, 'mono-cell');
+        addCell(tr, `${session.active ? 'active' : 'closed'}\n${session.end_reason || '-'}\n${durationMs((session.duration_seconds || 0) * 1000)}`);
+        addCell(tr, `${number(session.app_messages)} msg\n${byteSize(session.app_bytes_in)} in\n${byteSize(session.app_bytes_out)} out\npong ${ms(session.last_pong_latency_ms)}`);
+        addCell(tr, `${number(session.openai_events_up)} up\n${number(session.openai_events_down)} down\nreconnect ${number(session.openai_reconnects)}`);
+        addCell(tr, `workers ${number(session.pipeline_workers)}\nsend ${number(session.send_queue_len)}/${number(session.send_queue_cap)}\napi ${number(session.api_queue_len)}/${number(session.api_queue_cap)}`);
+        addCell(tr, summarizeEvents(session.events), 'mono-cell');
+        addCell(tr, summarizeResponses(session.responses), 'mono-cell');
+        tbody.appendChild(tr);
+    });
+}
+
+function addCell(tr, value, cls) {
+    const td = document.createElement('td');
+    td.textContent = value == null || value === '' ? '-' : String(value);
+    td.style.whiteSpace = 'pre-wrap';
+    if (cls) td.className = cls;
+    tr.appendChild(td);
+}
+
+// 提取一个 session 最近 5 个事件，避免表格过长。
+function summarizeEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) return '-';
+    return events.slice(-5).map(event => {
+        const at = event.at ? new Date(event.at).toLocaleTimeString() : '-';
+        return `${at} ${event.kind || '-'} ${event.detail || event.response_id || ''}`.trim();
+    }).join('\n');
+}
+
+// 提取最近 response 的最终文本、耗时、音频包信息。
+function summarizeResponses(responses) {
+    if (!Array.isArray(responses) || responses.length === 0) return '-';
+    return responses.slice(0, 3).map(resp => {
+        const content = resp.text || resp.transcript || '';
+        const shortContent = content.length > 180 ? content.slice(0, 180) + '...' : content;
+        return `${resp.response_id || '-'} ${resp.status || '-'} ${ms(resp.duration_ms)}\n${shortContent || `audio ${byteSize(resp.audio_bytes)} / packets ${number(resp.audio_packets)}`}`;
+    }).join('\n\n');
+}
+
+function renderRedisKeys(payload) {
+    if (!payload || payload.error || payload.code !== 200) {
+        ['k-total','k-session','k-billing','k-rate','k-openai','k-persist','k-expiring','k-other'].forEach(id => text(id, '-'));
+        text('k-cursor', '-');
+        text('k-error', payload?.error || payload?.message || 'Redis key API 不可用');
+        return;
+    }
+    const data = Array.isArray(payload.data) ? payload.data : [];
+    const stats = { session:0, billing:0, rate:0, openai:0, persist:0, expiring:0, other:0 };
+    data.forEach(item => {
+        const key = String(item.key || '').toLowerCase();
+        const category = String(item.category || '').toLowerCase();
+        if (item.ttl === -1) stats.persist++;
+        if (item.ttl > 0) stats.expiring++;
+        if (category === 'session' || key.includes('session:')) stats.session++;
+        else if (category === 'billing' || key.includes('billing:') || key.includes('usage:')) stats.billing++;
+        else if (category === 'rate_limit' || key.includes('rate') || key.includes('limit')) stats.rate++;
+        else if (category === 'openai' || key.includes('openai') || key.includes('realtime')) stats.openai++;
+        else stats.other++;
+    });
+    text('k-total', data.length);
+    text('k-cursor', `next cursor=${payload.cursor ?? '-'}`);
+    text('k-session', stats.session);
+    text('k-billing', stats.billing);
+    text('k-rate', stats.rate);
+    text('k-openai', stats.openai);
+    text('k-persist', stats.persist);
+    text('k-expiring', stats.expiring);
+    text('k-other', stats.other);
+    text('k-error', 'ok');
+}
+
+function renderSwitch(id, on) {
+    const el = $(id);
+    el.innerHTML = `<span class="badge ${on ? 'ok' : 'warn'}">${on ? '开启' : '关闭'}</span>`;
+}
+
+function setBadge(id, value, cls) {
+    const el = $(id);
+    el.className = `badge ${cls || ''}`;
+    el.textContent = value;
+}
+
+function text(id, value) { $(id).textContent = value == null || value === '' ? '-' : value; }
+function number(v) { return v == null || Number.isNaN(Number(v)) ? '-' : Number(v).toLocaleString(); }
+function mb(v) { return v == null ? '-' : `${Number(v).toFixed(1)} MB`; }
+function ms(v) { return v == null ? '-' : `${Number(v).toFixed(1)}ms`; }
+function byteSize(v) {
+    const n = Number(v || 0);
+    if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(2)} KB`;
+    return `${n.toLocaleString()} B`;
+}
+function durationMs(v) {
+    const n = Number(v || 0);
+    if (n >= 3600000) return `${(n / 3600000).toFixed(2)} h`;
+    if (n >= 60000) return `${(n / 60000).toFixed(2)} min`;
+    if (n >= 1000) return `${(n / 1000).toFixed(2)} s`;
+    return `${n.toFixed(0)} ms`;
+}
+function latencyText(summary) {
+    if (!summary || !summary.count) return '-';
+    return `avg ${ms(summary.avg)} / min ${ms(summary.min)} / max ${ms(summary.max)}`;
+}
+function objectSize(obj) {
+    return obj && typeof obj === 'object' ? Object.keys(obj).length : 0;
+}
+function topMap(obj) {
+    if (!obj || typeof obj !== 'object') return '-';
+    const items = Object.entries(obj).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 4);
+    if (items.length === 0) return '-';
+    return items.map(([k, v]) => `${k}:${number(v)}`).join(' / ');
+}
+function recentErrorText(recent) {
+    if (!Array.isArray(recent) || recent.length === 0) return 'no recent error';
+    const item = recent[recent.length - 1];
+    return `${item.kind || '-'} ${item.code || ''} ${item.detail || ''}`.trim();
+}
+</script>
+</body>
+</html>

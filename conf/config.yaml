@@ -1,0 +1,97 @@
+# conf/config.yaml
+# TozoAI-Chat-Api 基础核心配置文件
+# 此文件定义了所有环境的默认配置项，环境特定配置可在 config_dev.yaml 或 config_prod.yaml 中覆盖。
+
+# 基础运行环境
+env: dev
+
+# 服务监听配置
+server:
+  addr: ":8096"      # 服务监听的本地地址和端口
+  mode: debug        # 运行模式：debug（调试）, release（生产）, test（测试）
+
+# JWT 身份鉴权配置
+jwt:
+  enabled: true      # 是否启用 JWT 认证
+  secret: "dev-jwt-secret-key-32chars-minimum-for-local" # 签名密钥（生产环境应使用复杂随机字符串）
+  issuer: "TozoAI"   # 签发者标识
+  expire_hours: 24   # 令牌过期时间（小时）
+
+# Redis 存储配置（用于缓存、会话管理和限流计数）
+redis:
+  enabled: true                   # 是否启用 Redis
+  addr: "127.0.0.1:6379"          # Redis 服务地址
+  password: ""                    # 访问密码（留空则不使用密码）
+  db: 0                           # 指定使用的数据库索引
+  pool_size: 128                  # 单实例 Redis 连接池大小；生产按并发和 Redis 集群容量调优
+  min_idle_conns: 16              # 预热空闲连接，降低突发流量下的建连抖动
+
+# 日志存储配置
+logs:
+  root_dir: "./logs"  # 日志文件的存储根目录
+
+# 数据库配置（暂作为预留项）
+db:
+  enabled: false      # 是否启用数据库
+  driver: "mysql"     # 驱动名称
+  dsn: ""             # 数据库连接串（Data Source Name）
+
+# 全局功能开关
+rate_limit:
+  enabled: true       # 全局 API 限流开关
+fallback:
+  enabled: false      # HTTP 降级开关（当 WebSocket 连接失败时，是否自动尝试 HTTP 请求）
+billing:
+  enabled: true       # 计费与额度统计开关
+capacity:
+  max_active_sessions: 100000     # 单实例最大活跃 WS 会话数；百万并发通过多实例水平扩展达成
+
+# 模型配置中心
+# 定义系统中支持的 AI 模型及其各自的参数
+models:
+  # OpenAI 模型配置
+  openai:
+    enabled: true                     # 启用状态
+    api_key: "${OPENAI_API_KEY}"       # 授权密钥（从环境变量注入，本地调试可临时替换）
+    endpoint: "https://api.openai.com/v1" # API 基础端点
+    default_model: "gpt-realtime" # Realtime API 默认模型；如需降低成本可切换为 gpt-realtime-mini
+    instructions: "你是一个智能助手，回答用户的问题" # 默认系统指令
+    voice: "alloy"                    # 默认音色配置
+    rate_rps: 10                      # 每秒请求限制 (Requests Per Second)
+    rate_burst: 20                    # 允许的瞬时突发请求数
+    max_session_ttl: 3600             # 会话有效期（秒，默认 1 小时）
+    organization: ""                  # 组织 ID（可选）
+    # 扩展配置（针对特定模型的自定义参数）
+    extra:
+      max_retry: 3                    # 最大重试次数
+      timeout: 60                     # 请求超时时间（秒）
+    # Realtime WebSocket 配置
+    realtime:
+      ws_url: "wss://api.openai.com/v1/realtime" # WS 连接地址
+      reconnect_max_retries: 3                   # OpenAI 断线最大重连次数
+      reconnect_delay: "1s"                      # 每次重连前等待时间
+      # App↔Go 心跳配置
+      app_ping_interval: "30s"  # Go 向 App 发送 Ping 的间隔（建议 20-30s）
+      app_pong_timeout: "60s"   # 等待 App Pong 的超时（超时=会话结束，关闭 OpenAI 连接）
+      # Go↔OpenAI 心跳配置
+      api_read_timeout: "120s"  # 从 OpenAI 读消息的超时（超时=连接异常，触发重连）
+      api_ping_interval: "30s"  # Go 向 OpenAI 发送 WS Ping 的间隔
+      api_pong_timeout: "90s"   # OpenAI Pong/任意消息超时，超过即认为上游半断开
+      api_write_timeout: "10s"  # 写 OpenAI 超时，防止上游卡死拖住业务协程
+      restore_session: true     # OpenAI 重连后重放 session.update 和最近 conversation.item.* 事件
+      restore_history_limit: 32 # 每个会话最多缓存并重放的上下文事件数
+      send_queue_timeout_ms: 250 # App 下行队列满时最多等待；超时丢弃并告警
+
+  # Azure OpenAI 模型配置
+  azureai:
+    enabled: false                    # 默认不启用
+    api_key: "${AZURE_OPENAI_API_KEY}"  # Azure API Key（从环境变量注入）
+    endpoint: "https://tozoapp.openai.azure.com/openai/v1" # Azure API 端点
+    default_model: "gpt-4o-realtime-preview" # 默认模型/部署版本
+    rate_rps: 5                       # Azure 的 RPS 限制
+    rate_burst: 10                    # Azure 的突发限制
+    max_session_ttl: 3600             # 会话有效期
+    extra:
+      deployment_name: "gpt-4o-realtime" # Azure 专属：部署名称
+      max_retry: 3
+      heartbeat_interval: 30
