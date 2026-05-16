@@ -699,12 +699,29 @@ func (c *Client) handleAppTextMessage(data []byte) error {
 	if plan.closeSession {
 		return errGatewaySessionClose
 	}
+	if plan.interruptActive {
+		if err := c.interruptActiveResponse("app_interrupt:" + plan.reason); err != nil {
+			return err
+		}
+	}
 	for _, event := range plan.openAIEvents {
 		if err := c.forwardClientEvent(event, plan.reason); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *Client) interruptActiveResponse(reason string) error {
+	payload, err := marshalJSON(map[string]any{"type": "response.cancel"})
+	if err != nil {
+		return err
+	}
+	return c.enqueueOpenAIOutbound(openAIOutbound{
+		eventType: string(protocol.ClientEventTypeResponseCancel),
+		data:      payload,
+		reason:    reason,
+	})
 }
 
 // handleAppBinaryMessage 将二进制音频包装为 input_audio_buffer.append
@@ -810,12 +827,15 @@ func (c *Client) handleOpenAIMessageGateway(data []byte) {
 	case *protocol.ResponseCreatedEvent:
 		metrics.OpenAIResponseCreated(c.sessionID, v.Response.ID)
 		stdResp = response.NewResponseWithID(0, response.EventBegin, v.Response.ID, "", time.Now().UnixMilli())
+		if reason, ok := c.respGate.takeCancelAfterCreated(v.Response.ID); ok {
+			c.enqueueCancelAfterCreated(v.Response.ID, reason)
+		}
 	case *protocol.ResponseDoneEvent:
 		inputTokens, outputTokens := 0, 0
 		if v.Response.Usage != nil && c.sessionID != "" {
 			inputTokens = v.Response.Usage.InputTokens
 			outputTokens = v.Response.Usage.OutputTokens
-			if err := billing.RecordTokenUsage(c.Name(), c.sessionID, c.userID, v.Response.Usage.InputTokens, v.Response.Usage.OutputTokens); err != nil {
+			if err := billing.RecordTokenUsageDetail(c.Name(), c.sessionID, c.userID, billingDetailFromUsage(v.Response.ID, v.Response.Usage)); err != nil {
 				metrics.BillingError(c.sessionID, err)
 				c.log.Warn("record OpenAI token usage failed", zap.Error(err))
 			}
@@ -859,6 +879,9 @@ func (c *Client) handleOpenAIMessageGateway(data []byte) {
 		metrics.OpenAIError(c.sessionID, v.Error.Code, v.Error.Message)
 		stdResp = response.NewResponseWithID(500, response.EventError, "", v.Error, time.Now().UnixMilli())
 		c.log.Warn("OpenAI error event", zap.String("code", v.Error.Code), zap.String("message", v.Error.Message))
+		if c.respGate.takeCancelUnknownActive() {
+			c.enqueueCancelAfterCreated("", "conversation_already_has_active_response")
+		}
 	default:
 		switch eventType {
 		case protocol.ServerEventTypeSessionCreated:
@@ -884,6 +907,25 @@ func (c *Client) handleOpenAIMessageGateway(data []byte) {
 	}
 	if flushPending {
 		c.flushPendingResponseCreate()
+	}
+}
+
+func (c *Client) enqueueCancelAfterCreated(responseID, reason string) {
+	payload := map[string]any{"type": "response.cancel"}
+	if responseID != "" {
+		payload["response_id"] = responseID
+	}
+	cancelEvent, err := marshalJSON(payload)
+	if err != nil {
+		c.log.Warn("构造延迟取消事件失败", zap.String("reason", reason), zap.Error(err))
+		return
+	}
+	if err := c.enqueueOpenAIOutbound(openAIOutbound{
+		eventType: string(protocol.ClientEventTypeResponseCancel),
+		data:      cancelEvent,
+		reason:    "delayed_cancel:" + reason,
+	}); err != nil {
+		c.log.Warn("投递延迟取消事件失败", zap.String("reason", reason), zap.Error(err))
 	}
 }
 
@@ -924,63 +966,31 @@ func (c *Client) handleFunctionCallArgumentsDone(evt *protocol.ResponseFunctionC
 }
 
 func (c *Client) handleWeatherFunctionCall(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, args map[string]any) *response.StandardResponse {
-	city := stringFromAny(args["city"])
-	if city == "" {
-		ctx := c.gateway.clientContextSnapshot()
-		if ctx.lat == "" || ctx.lon == "" {
-			_ = c.cancelActiveFunctionResponse(evt.ResponseID, "weather_missing_coordinates")
-			return response.NewResponseWithID(0, gatewayResponseOpenWeatherMissingCoords, evt.ResponseID, map[string]any{
-				"service_name": evt.Name,
-				"args":         args,
-				"message":      "天气查询缺少城市和 GPS 坐标，旧 App 需要弹出定位授权或补传坐标。",
-			}, time.Now().UnixMilli())
-		}
-	}
-
-	output := map[string]any{
-		"ok":      false,
-		"code":    "weather_provider_not_configured",
-		"message": "Go 版本已接收天气函数调用，但 OpenWeather Provider 尚未配置为可调用模块。",
-		"args":    args,
-	}
-	c.sendFunctionOutputAndCreate(evt, output, "weather_provider_not_configured")
-	return response.NewResponseWithID(501, gatewayResponseOpenWeatherError, evt.ResponseID, output, time.Now().UnixMilli())
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GetToolTimeout())
+	defer cancel()
+	return c.applyFunctionToolResult(evt, c.executeWeatherFunctionTool(ctx, evt, args))
 }
 
 func (c *Client) handleKnowledgeFunctionCall(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, args map[string]any) *response.StandardResponse {
-	output := map[string]any{
-		"ok":      false,
-		"code":    "tozo_knowledge_provider_not_configured",
-		"message": "Go 版本已接收 TOZO 知识库检索函数调用，但知识库检索 Provider 尚未配置。",
-		"args":    args,
-	}
-	c.sendFunctionOutputAndCreate(evt, output, "tozo_knowledge_provider_not_configured")
-	return response.NewResponseWithID(501, response.EventError, evt.ResponseID, output, time.Now().UnixMilli())
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GetToolTimeout())
+	defer cancel()
+	return c.applyFunctionToolResult(evt, c.executeKnowledgeFunctionTool(ctx, evt, args))
 }
 
 func (c *Client) handleNavigationFunctionCall(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, args map[string]any) *response.StandardResponse {
-	ctx := c.gateway.clientContextSnapshot()
-	content := map[string]any{
-		"service_name": evt.Name,
-		"args":         args,
-	}
-	if ctx.lat == "" || ctx.lon == "" {
-		_ = c.cancelActiveFunctionResponse(evt.ResponseID, "map_missing_coordinates")
-		return response.NewResponseWithID(0, gatewayResponseMapServiceMissingCoordinates, evt.ResponseID, content, time.Now().UnixMilli())
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GetToolTimeout())
+	defer cancel()
+	return c.applyFunctionToolResult(evt, c.executeNavigationFunctionTool(ctx, evt, args))
+}
 
-	output := map[string]any{
-		"ok":           false,
-		"code":         "map_provider_not_configured",
-		"message":      "Go 版本已识别地图函数调用，但 Google/Amap/Mapbox Provider 尚未配置为可调用模块。",
-		"service_name": evt.Name,
-		"args":         args,
-		"lat":          ctx.lat,
-		"lon":          ctx.lon,
-		"map_sdk":      firstNonEmpty(ctx.mapSDK, "mapbox"),
+func (c *Client) applyFunctionToolResult(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, result realtimeToolResult) *response.StandardResponse {
+	if result.cancelActive {
+		_ = c.cancelActiveFunctionResponse(evt.ResponseID, result.cancelReason)
 	}
-	c.sendFunctionOutputAndCreate(evt, output, "map_provider_not_configured")
-	return response.NewResponseWithID(501, gatewayResponseMapServiceFail, evt.ResponseID, output, time.Now().UnixMilli())
+	if result.continueResponse && result.output != nil {
+		c.sendFunctionOutputAndCreate(evt, result.output, result.reason)
+	}
+	return result.appResponse
 }
 
 func (c *Client) sendFunctionOutputAndCreate(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, output map[string]any, reason string) {
@@ -1055,6 +1065,39 @@ func extractDoneContent(resp protocol.Response) string {
 		}
 	}
 	return ""
+}
+
+func billingDetailFromUsage(responseID string, usage *protocol.Usage) billing.TokenUsageDetail {
+	if usage == nil {
+		return billing.TokenUsageDetail{ResponseID: responseID}
+	}
+	detail := billing.TokenUsageDetail{
+		ResponseID:   responseID,
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		TotalTokens:  usage.TotalTokens,
+	}
+	if detail.TotalTokens <= 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
+	}
+	if usage.InputTokenDetails != nil {
+		detail.InputTextTokens = usage.InputTokenDetails.TextTokens
+		detail.InputAudioTokens = usage.InputTokenDetails.AudioTokens
+		detail.CachedTokens += usage.InputTokenDetails.CachedTokens
+		detail.ReasoningTokens += usage.InputTokenDetails.ReasoningTokens
+	}
+	if usage.OutputTokenDetails != nil {
+		detail.OutputTextTokens = usage.OutputTokenDetails.TextTokens
+		detail.OutputAudioTokens = usage.OutputTokenDetails.AudioTokens
+		detail.CachedTokens += usage.OutputTokenDetails.CachedTokens
+		detail.ReasoningTokens += usage.OutputTokenDetails.ReasoningTokens
+	}
+	if usage.InputTokenDetails == nil && usage.OutputTokenDetails == nil {
+		detail.DetailSource = "usage_total_only"
+	} else {
+		detail.DetailSource = "usage_detail"
+	}
+	return detail
 }
 
 // extractResponseID 从 OpenAI 流式服务端事件中提取 response_id。

@@ -183,6 +183,75 @@ func TestOpenAIResponseGateQueuesCreateUntilDone(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponseGateDelaysCancelWhileCreating(t *testing.T) {
+	gate := newOpenAIResponseGate()
+	sent := make([]string, 0, 2)
+	send := func(data []byte) error {
+		sent = append(sent, string(data))
+		return nil
+	}
+
+	if err := gate.sendClientEvent(string(protocol.ClientEventTypeResponseCreate), []byte(`{"type":"response.create"}`), "create", send); err != nil {
+		t.Fatalf("response.create: %v", err)
+	}
+	if err := gate.sendClientEvent(string(protocol.ClientEventTypeResponseCancel), []byte(`{"type":"response.cancel"}`), "app_interrupt", send); err != nil {
+		t.Fatalf("response.cancel: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent len before response.created = %d, want 1", len(sent))
+	}
+
+	gate.onServerEvent(&protocol.ResponseCreatedEvent{
+		ServerEventBase: protocol.ServerEventBase{Type: protocol.ServerEventTypeResponseCreated},
+		Response:        protocol.Response{ID: "resp_1"},
+	})
+	reason, ok := gate.takeCancelAfterCreated("resp_1")
+	if !ok {
+		t.Fatalf("takeCancelAfterCreated ok = false, want true")
+	}
+	if reason != "app_interrupt" {
+		t.Fatalf("cancel reason = %q, want app_interrupt", reason)
+	}
+	if err := gate.sendClientEvent(string(protocol.ClientEventTypeResponseCancel), []byte(`{"type":"response.cancel","response_id":"resp_1"}`), reason, send); err != nil {
+		t.Fatalf("delayed response.cancel: %v", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent len after response.created = %d, want 2", len(sent))
+	}
+	if !strings.Contains(sent[1], `"response.cancel"`) || !strings.Contains(sent[1], `"resp_1"`) {
+		t.Fatalf("delayed cancel payload = %s", sent[1])
+	}
+}
+
+func TestGatewayAdapterMarksTextAndCommittedAudioAsInterrupt(t *testing.T) {
+	cfg := NewOpenAIConfig(&conf.ModelConfig{Instructions: "test instructions", Voice: "alloy"})
+	adapter := newGatewayAdapter()
+
+	textPlan, err := adapter.buildClientPlan([]byte(`{"msgType":"text","content":"hello"}`), cfg, "session-1")
+	if err != nil {
+		t.Fatalf("text buildClientPlan returned error: %v", err)
+	}
+	if !textPlan.interruptActive {
+		t.Fatalf("text interruptActive = false, want true")
+	}
+
+	audioPlan, err := adapter.buildClientPlan([]byte(`{"msgType":"audio","content":"AA=="}`), cfg, "session-1")
+	if err != nil {
+		t.Fatalf("audio buildClientPlan returned error: %v", err)
+	}
+	if !audioPlan.interruptActive {
+		t.Fatalf("audio interruptActive = false, want true")
+	}
+
+	speakerPlan, err := adapter.buildClientPlan([]byte(`{"msgType":"speaker","content":"AA=="}`), cfg, "session-1")
+	if err != nil {
+		t.Fatalf("speaker buildClientPlan returned error: %v", err)
+	}
+	if speakerPlan.interruptActive {
+		t.Fatalf("speaker interruptActive = true, want false")
+	}
+}
+
 func TestStandardResponseJSONIncludesLegacyAndSnakeResponseID(t *testing.T) {
 	resp := response.NewResponseWithID(0, response.EventBegin, "resp_1", "", 1)
 	data, err := resp.ToJSON()

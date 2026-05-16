@@ -4,9 +4,11 @@
 package openai
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +58,35 @@ func (c *OpenAIConfig) ExtraString(key string) string {
 		return strings.TrimSpace(v.String())
 	default:
 		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+// ExtraInt 从模型 extra 扩展配置读取整数。
+// 这里兼容 YAML 中的 int、float64、json.Number 和字符串，避免调用方到处重复类型断言。
+func (c *OpenAIConfig) ExtraInt(key string) int {
+	if c == nil || c.Extra == nil {
+		return 0
+	}
+	value, ok := c.Extra[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(v))
+		return n
+	default:
+		n, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(v)))
+		return n
 	}
 }
 
@@ -303,4 +334,17 @@ func (c *OpenAIConfig) GetSendQueueTimeout() time.Duration {
 		return time.Duration(c.Realtime.SendQueueTimeoutMs) * time.Millisecond
 	}
 	return 250 * time.Millisecond
+}
+
+// GetToolTimeout 获取 function_call 工具执行超时。
+// 工具调用发生在 OpenAI 等待 function_call_output 的阶段，时间过长会让用户觉得卡顿；
+// 默认 8 秒，生产环境可以按天气、地图、知识库供应商的 SLA 在 extra.tool_timeout_ms 调整。
+func (c *OpenAIConfig) GetToolTimeout() time.Duration {
+	if ms := c.ExtraInt("tool_timeout_ms"); ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	if seconds := c.ExtraInt("tool_timeout"); seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return 8 * time.Second
 }

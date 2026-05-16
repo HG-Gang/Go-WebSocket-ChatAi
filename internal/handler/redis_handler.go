@@ -145,10 +145,18 @@ func RedisKeysHandler(c *gin.Context) {
 func explainRedisKey(key string) (category, description string) {
 	k := strings.ToLower(key)
 	switch {
+	case strings.Contains(k, "billing:response:"):
+		return "billing", "单次 OpenAI response 的 token 明细 key，包含 response_id、session_id、input/output token、text/audio token 拆分和明细来源。"
+	case strings.Contains(k, "billing:daily_detail:"):
+		return "billing", "每日 token 明细汇总 key，按模型和日期累计 response 数、输入/输出 token、text/audio token、cached/reasoning token。"
+	case strings.Contains(k, "billing:daily:"):
+		return "billing", "每日 token 总量 key，按模型和日期累计 total_tokens，用于快速查看当天总体消耗。"
+	case strings.Contains(k, "billing:duration:") || strings.Contains(k, "billing:daily_duration:"):
+		return "billing", "音频时长计费 key，记录输入音频、输出音频和总音频时长，可按用户/模块/日期聚合。"
 	case strings.Contains(k, "session:"):
 		return "session", "Go WebSocket 会话元数据，通常包含 user_id、request_id、model、start_time、status、end_time 等字段，用于排查某个 App/耳机会话生命周期。"
 	case strings.Contains(k, "billing:") || strings.Contains(k, "usage:") || strings.Contains(k, "duration"):
-		return "billing", "计费/用量统计 key，用于累计 token、输入音频时长、输出音频时长、用户/模块/日期维度消耗。"
+		return "billing", "计费/用量统计 key，用于累计 session token、response token 明细、输入/输出音频时长或用户/日期维度消耗。"
 	case strings.Contains(k, "rate_limit") || strings.Contains(k, "ratelimit") || strings.Contains(k, "limit:"):
 		return "rate_limit", "限流计数 key，一般带短 TTL，用于限制用户/模型/接口在当前时间窗口内的请求频率。"
 	case strings.Contains(k, "openai") || strings.Contains(k, "realtime"):

@@ -42,10 +42,11 @@ const (
 var errGatewaySessionClose = errors.New("gateway session close requested")
 
 type gatewayClientPlan struct {
-	openAIEvents [][]byte
-	appMessages  [][]byte
-	reason       string
-	closeSession bool
+	openAIEvents    [][]byte
+	appMessages     [][]byte
+	reason          string
+	closeSession    bool
+	interruptActive bool // 是否表示用户新一轮输入，需要先打断当前上游响应
 }
 
 type gatewaySessionSnapshot struct {
@@ -201,7 +202,7 @@ func (g *gatewayAdapter) planText(raw map[string]json.RawMessage, cfg *OpenAICon
 		return gatewayClientPlan{}, err
 	}
 	events = append(events, item, create)
-	return gatewayClientPlan{openAIEvents: events, reason: msgType}, nil
+	return gatewayClientPlan{openAIEvents: events, reason: msgType, interruptActive: true}, nil
 }
 
 func (g *gatewayAdapter) planAudio(raw map[string]json.RawMessage, cfg *OpenAIConfig, msgType string, commit bool) (gatewayClientPlan, error) {
@@ -232,7 +233,7 @@ func (g *gatewayAdapter) planAudio(raw map[string]json.RawMessage, cfg *OpenAICo
 		}
 		events = append(events, commitEvent)
 	}
-	return gatewayClientPlan{openAIEvents: events, reason: msgType}, nil
+	return gatewayClientPlan{openAIEvents: events, reason: msgType, interruptActive: commit}, nil
 }
 
 func (g *gatewayAdapter) planHistory(raw map[string]json.RawMessage, sessionID string) (gatewayClientPlan, error) {
@@ -310,6 +311,7 @@ func (g *gatewayAdapter) planWeatherReject(raw map[string]json.RawMessage, cfg *
 	}
 	_ = sessionID
 	plan.openAIEvents = append(events, item, create)
+	plan.interruptActive = true
 	return plan, nil
 }
 
@@ -340,7 +342,7 @@ func (g *gatewayAdapter) planWeatherCoordinate(raw map[string]json.RawMessage, c
 		return gatewayClientPlan{}, err
 	}
 	_ = sessionID
-	return gatewayClientPlan{openAIEvents: append(events, item, create), reason: gatewayMsgWeatherSearch}, nil
+	return gatewayClientPlan{openAIEvents: append(events, item, create), reason: gatewayMsgWeatherSearch, interruptActive: true}, nil
 }
 
 func (g *gatewayAdapter) planMapServiceSearch(raw map[string]json.RawMessage, sessionID string) (gatewayClientPlan, error) {
@@ -630,13 +632,16 @@ const (
 // openAIResponseGate 是 Events::$openaiResponseStates 和 Events::$pendingOpenAIResponseCreates 的 Go 版本。
 // 它串行化 response.create 与 response.cancel，避免长时间语音聊天中默认 OpenAI 对话收到重复活跃响应。
 type openAIResponseGate struct {
-	mu                 sync.Mutex
-	state              responseGateState
-	responseID         string
-	reason             string
-	pendingCreate      []byte
-	pendingCreateCause string
-	interrupted        map[string]struct{}
+	mu                       sync.Mutex
+	state                    responseGateState
+	responseID               string
+	reason                   string
+	pendingCreate            []byte
+	pendingCreateCause       string
+	cancelAfterCreated       bool
+	cancelAfterCreatedReason string
+	cancelUnknownActive      bool
+	interrupted              map[string]struct{}
 }
 
 func newOpenAIResponseGate() *openAIResponseGate {
@@ -677,6 +682,20 @@ func (g *openAIResponseGate) sendCreate(payload []byte, reason string, send func
 func (g *openAIResponseGate) sendCancel(responseID, reason string, send func([]byte) error) error {
 	g.mu.Lock()
 	if !g.isBusyLocked() {
+		g.mu.Unlock()
+		return nil
+	}
+	if g.state == responseGateCancelling {
+		g.reason = "dedupe_cancel:" + reason
+		g.mu.Unlock()
+		return nil
+	}
+	if g.state == responseGateCreating && responseID == "" {
+		// 上游还没有返回 response.created，此时直接 response.cancel 很容易得到
+		// response_cancel_not_active。先记录意图，等 response.created 到达后立刻取消。
+		g.cancelAfterCreated = true
+		g.cancelAfterCreatedReason = reason
+		g.reason = "cancel_after_created:" + reason
 		g.mu.Unlock()
 		return nil
 	}
@@ -779,14 +798,48 @@ func (g *openAIResponseGate) syncFromErrorLocked(err protocol.Error) bool {
 	case "responsecancelnotactive":
 		g.state = responseGateIdle
 		g.responseID = ""
+		g.cancelAfterCreated = false
+		g.cancelAfterCreatedReason = ""
 		g.reason = "openai_error:response_cancel_not_active"
 		return g.pendingCreate != nil
 	case "conversationalreadyhasactiveresponse":
 		g.state = responseGateActive
 		g.responseID = extractResponseIDFromText(err.Message)
+		g.cancelUnknownActive = g.pendingCreate != nil
 		g.reason = "openai_error:conversation_already_has_active_response"
 	}
 	return false
+}
+
+func (g *openAIResponseGate) isBusy() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.isBusyLocked()
+}
+
+func (g *openAIResponseGate) takeCancelAfterCreated(responseID string) (string, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.cancelAfterCreated {
+		return "", false
+	}
+	reason := g.cancelAfterCreatedReason
+	g.cancelAfterCreated = false
+	g.cancelAfterCreatedReason = ""
+	if responseID != "" {
+		g.responseID = responseID
+	}
+	return reason, true
+}
+
+func (g *openAIResponseGate) takeCancelUnknownActive() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.cancelUnknownActive {
+		return false
+	}
+	g.cancelUnknownActive = false
+	return true
 }
 
 func responseCreateAudio() ([]byte, error) {

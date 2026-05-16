@@ -104,8 +104,9 @@ const dom = {
     btnSendTextMsg:    () => document.getElementById('btn-send-text-msg'),
     logContainer:      () => document.getElementById('log-container'),
     logAutoScroll:     () => document.getElementById('log-auto-scroll'),
-    logShowHeartbeat:  () => document.getElementById('log-show-heartbeat'),
-    logShowRaw:        () => document.getElementById('log-show-raw'),
+    logLevelFilter:    () => document.getElementById('log-level-filter'),
+    logRawFilter:      () => document.getElementById('log-raw-filter'),
+    logTextFilter:     () => document.getElementById('log-text-filter'),
     btnClearLog:       () => document.getElementById('btn-clear-log'),
     btnExportLog:      () => document.getElementById('btn-export-log'),
     themeSelect:       () => document.getElementById('theme-select'),
@@ -117,6 +118,7 @@ const dom = {
     sessionEventsModal:() => document.getElementById('session-events-modal'),
     btnCloseSessionEvents: () => document.getElementById('btn-close-session-events'),
     sessionEventList:  () => document.getElementById('session-event-list'),
+    completeResponseFilter: () => document.getElementById('complete-response-filter'),
     completeResponseList: () => document.getElementById('complete-response-list'),
     completeResponseMeta: () => document.getElementById('complete-response-meta'),
     completeResponseContent: () => document.getElementById('complete-response-content'),
@@ -217,6 +219,9 @@ document.addEventListener('DOMContentLoaded', () => {
     dom.btnSendTextMsg().addEventListener('click', sendTextMessage);
     dom.btnClearLog().addEventListener('click', clearLog);
     dom.btnExportLog().addEventListener('click', exportLog);
+    dom.logLevelFilter().addEventListener('change', applyLogFilters);
+    dom.logRawFilter().addEventListener('change', applyLogFilters);
+    dom.logTextFilter().addEventListener('input', applyLogFilters);
     dom.themeSelect().addEventListener('change', () => applyTheme(dom.themeSelect().value));
     dom.btnRecentEvents().addEventListener('click', openRecentEventsModal);
     dom.btnCloseRecentEvents().addEventListener('click', (event) => {
@@ -236,7 +241,8 @@ document.addEventListener('DOMContentLoaded', () => {
     dom.sessionEventsModal().addEventListener('click', (event) => {
         if (event.target === dom.sessionEventsModal()) closeSessionEventsModal();
     });
-    dom.completeResponseList().addEventListener('change', () => updateCompleteResponseUI());
+    dom.completeResponseFilter().addEventListener('change', () => updateCompleteResponseUI(''));
+    dom.completeResponseList().addEventListener('change', () => updateCompleteResponseUI(dom.completeResponseList().value));
     dom.btnClearResponses().addEventListener('click', clearCompleteResponses);
 
     // 消息类型切换时自动填充模板
@@ -450,7 +456,7 @@ async function connect() {
                 updateEventStatsUI();
                 updateCompleteResponseUI(responseId || state.eventStats.currentResponseId);
                 // 音频增量（高频，默认不显示详情）
-                if (dom.logShowHeartbeat().checked) {
+                if (shouldLogLevel('heartbeat')) {
                     log('heartbeat', '音频', `收到音频增量 [payload=${audioDelta.length} chars, frame=${data.length} bytes]`);
                 }
                 break;
@@ -484,7 +490,7 @@ async function connect() {
                 // 应用层心跳（如果服务端发送）
                 dom.lastPong().textContent = formatTime(Date.now());
                 addHeartbeatEvent('pong', `服务端心跳 ts=${parsed.ts || parsed.timestamp || parsed.time || parsed.content?.ts || '-'}`);
-                if (dom.logShowHeartbeat().checked) {
+                if (shouldLogLevel('heartbeat')) {
                     log('heartbeat', '心跳', `收到服务端心跳`);
                 }
                 return; // 不在主日志中显示
@@ -495,7 +501,7 @@ async function connect() {
         }
 
         // 显示原始数据（可折叠）
-        if (dom.logShowRaw().checked && responseEvent !== 'audio_delta') {
+        if (shouldShowRawData() && responseEvent !== 'audio_delta') {
             try {
                 const pretty = JSON.stringify(parsed, null, 2);
                 if (pretty.length < 2000) {
@@ -632,7 +638,7 @@ function startClientHeartbeat() {
             dom.lastPing().textContent = formatTime(now);
             addHeartbeatEvent('ping', `客户端心跳 ts=${now}`);
 
-            if (dom.logShowHeartbeat().checked) {
+            if (shouldLogLevel('heartbeat')) {
                 log('heartbeat', '心跳', `已发送客户端心跳`);
             }
         } catch (err) {
@@ -1056,16 +1062,19 @@ function extractFinalContent(payload) {
 function refreshResponseOptions(selectedId) {
     const select = dom.completeResponseList();
     if (!select) return;
+    const records = filteredResponseRecords();
     const previous = selectedId || select.value;
     select.innerHTML = '';
-    for (const rec of state.eventStats.responses.values()) {
+    for (const rec of records) {
         const option = document.createElement('option');
         option.value = rec.id;
-        option.textContent = `${rec.id} (${rec.status})`;
+        option.textContent = `${rec.id} | ${responseStatusText(rec.status)} | text=${rec.text.length} transcript=${rec.transcript.length} audio=${formatBytes(rec.audioChars)}`;
         select.appendChild(option);
     }
-    if (previous && state.eventStats.responses.has(previous)) {
+    if (previous && records.some(rec => rec.id === previous)) {
         select.value = previous;
+    } else if (records.length > 0) {
+        select.value = records[records.length - 1].id;
     }
 }
 
@@ -1084,14 +1093,16 @@ function updateCompleteResponseUI(selectedId) {
     const id = selectedId || select.value;
     const rec = state.eventStats.responses.get(id);
     if (!rec) {
-        meta.textContent = '-';
-        content.textContent = '暂无完整响应';
+        const filter = dom.completeResponseFilter()?.value || 'all';
+        meta.textContent = `筛选=${responseFilterText(filter)} | 命中 0 条`;
+        content.textContent = '暂无符合当前筛选条件的完整响应';
         return;
     }
     const elapsed = rec.endedAt
         ? `${((rec.endedAt - rec.startedAt) / 1000).toFixed(2)}s`
         : '生成中';
-    meta.textContent = `状态=${rec.status} | 耗时=${elapsed} | text=${rec.text.length} chars | transcript=${rec.transcript.length} chars | audio=${formatBytes(rec.audioChars)}`;
+    const records = filteredResponseRecords();
+    meta.textContent = `筛选=${responseFilterText(dom.completeResponseFilter()?.value || 'all')} | 当前 ${records.findIndex(item => item.id === rec.id) + 1}/${records.length} | 状态=${responseStatusText(rec.status)} | 耗时=${elapsed} | text=${rec.text.length} chars | transcript=${rec.transcript.length} chars | audio=${formatBytes(rec.audioChars)}`;
     const completeParts = [];
     if (rec.finalContent || rec.text || rec.transcript) {
         completeParts.push(`【最终聚合内容】\n${rec.finalContent || rec.text || rec.transcript}`);
@@ -1106,6 +1117,43 @@ function clearCompleteResponses() {
     state.eventStats.responses.clear();
     state.eventStats.currentResponseId = '';
     updateCompleteResponseUI();
+}
+
+function filteredResponseRecords() {
+    const filter = dom.completeResponseFilter()?.value || 'all';
+    return Array.from(state.eventStats.responses.values()).filter(rec => {
+        switch (filter) {
+            case 'streaming': return rec.status === 'streaming';
+            case 'done': return rec.status === 'done';
+            case 'error': return rec.status === 'error';
+            case 'text': return (rec.text || rec.finalContent || '').length > 0;
+            case 'transcript': return (rec.transcript || '').length > 0;
+            case 'audio': return (rec.audioChars || 0) > 0;
+            default: return true;
+        }
+    });
+}
+
+function responseStatusText(status) {
+    switch (status) {
+        case 'streaming': return '生成中';
+        case 'done': return '已完成';
+        case 'error': return '错误';
+        default: return status || '-';
+    }
+}
+
+function responseFilterText(filter) {
+    const names = {
+        all: '全部响应',
+        streaming: '生成中',
+        done: '已完成',
+        error: '错误响应',
+        text: '包含文本',
+        transcript: '包含转写',
+        audio: '包含音频'
+    };
+    return names[filter] || filter;
 }
 
 /**
@@ -1272,17 +1320,17 @@ function addHeartbeatEvent(type, text) {
  * @param {string} msg   - 日志内容
  */
 function log(level, tag, msg) {
-    // 心跳日志过滤
-    if (level === 'heartbeat' && !dom.logShowHeartbeat().checked) return;
-
     const container = dom.logContainer();
     const entry = document.createElement('div');
     entry.className = `log-entry ${level}`;
+    entry.dataset.level = level;
+    entry.dataset.search = `${level} ${tag} ${msg}`.toLowerCase();
 
     const time = formatTime(Date.now());
     entry.innerHTML = `<span class="log-time">[${time}]</span><span class="log-tag">[${tag}]</span><span class="log-msg">${escapeHtml(msg)}</span>`;
 
     container.appendChild(entry);
+    applyLogFilterToEntry(entry);
 
     // 最多保留 500 条
     while (container.children.length > 500) {
@@ -1301,13 +1349,50 @@ function log(level, tag, msg) {
 function logRawData(data) {
     const container = dom.logContainer();
     const entry = document.createElement('div');
-    entry.className = 'log-entry';
+    entry.className = 'log-entry raw';
+    entry.dataset.level = 'raw';
+    entry.dataset.search = data.toLowerCase();
     entry.innerHTML = `<span class="log-data">${escapeHtml(data)}</span>`;
     container.appendChild(entry);
+    applyLogFilterToEntry(entry);
 
     if (dom.logAutoScroll().checked) {
         container.scrollTop = container.scrollHeight;
     }
+}
+
+function shouldLogLevel(level) {
+    const filter = dom.logLevelFilter()?.value || 'normal';
+    return filter === 'all' || filter === level;
+}
+
+function shouldShowRawData() {
+    return (dom.logRawFilter()?.value || 'show') === 'show';
+}
+
+function applyLogFilters() {
+    dom.logContainer().querySelectorAll('.log-entry').forEach(applyLogFilterToEntry);
+}
+
+function applyLogFilterToEntry(entry) {
+    const level = entry.dataset.level || '';
+    const levelFilter = dom.logLevelFilter()?.value || 'normal';
+    const rawFilter = dom.logRawFilter()?.value || 'show';
+    const keyword = (dom.logTextFilter()?.value || '').trim().toLowerCase();
+
+    let visible = true;
+    if (level === 'raw' && rawFilter === 'hide') {
+        visible = false;
+    }
+    if (visible && levelFilter === 'normal') {
+        visible = level !== 'heartbeat';
+    } else if (visible && levelFilter !== 'all') {
+        visible = level === levelFilter;
+    }
+    if (visible && keyword) {
+        visible = (entry.dataset.search || entry.textContent.toLowerCase()).includes(keyword);
+    }
+    entry.classList.toggle('filtered-out', !visible);
 }
 
 /**
@@ -1323,7 +1408,7 @@ function clearLog() {
  */
 function exportLog() {
     const container = dom.logContainer();
-    const entries = container.querySelectorAll('.log-entry');
+    const entries = container.querySelectorAll('.log-entry:not(.filtered-out)');
     let text = `TozoAI WebSocket 测试日志\n导出时间: ${new Date().toLocaleString()}\n${'='.repeat(60)}\n\n`;
 
     entries.forEach(entry => {

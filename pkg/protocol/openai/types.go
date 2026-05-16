@@ -115,7 +115,7 @@ const (
 type AudioFormat string
 
 const (
-	AudioFormatPCM16   AudioFormat = "pcm16"     // 16位PCM格式（默认）
+	AudioFormatPCM16    AudioFormat = "pcm16"     // 16位PCM格式（默认）
 	AudioFormatG711ULaw AudioFormat = "g711_ulaw" // G.711 μ-law
 	AudioFormatG711ALaw AudioFormat = "g711_alaw" // G.711 A-law
 )
@@ -218,10 +218,10 @@ type MessageContentPart struct {
 // MessageItem 消息条目（对话中的一条消息）
 type MessageItem struct {
 	ID      string               `json:"id"`      // 消息唯一ID
-	Type    MessageItemType      `json:"type"`     // 消息类型
-	Status  ItemStatus           `json:"status"`   // 消息状态
-	Role    MessageRole          `json:"role"`     // 角色
-	Content []MessageContentPart `json:"content"`  // 内容列表
+	Type    MessageItemType      `json:"type"`    // 消息类型
+	Status  ItemStatus           `json:"status"`  // 消息状态
+	Role    MessageRole          `json:"role"`    // 角色
+	Content []MessageContentPart `json:"content"` // 内容列表
 }
 
 // ResponseMessageItem 响应消息条目（带 object 字段）
@@ -234,9 +234,9 @@ type ResponseMessageItem struct {
 
 const (
 	ObjectRealtimeSession string = "realtime.session"      // 会话对象
-	ObjectConversation    string = "realtime.conversation"  // 对话对象
-	ObjectResponse        string = "realtime.response"      // 响应对象
-	ObjectItem            string = "realtime.item"          // 条目对象
+	ObjectConversation    string = "realtime.conversation" // 对话对象
+	ObjectResponse        string = "realtime.response"     // 响应对象
+	ObjectItem            string = "realtime.item"         // 条目对象
 )
 
 // ======================== 状态枚举 ========================
@@ -265,10 +265,10 @@ const (
 
 // Error OpenAI Realtime API 错误结构体
 type Error struct {
-	Message string `json:"message,omitempty"` // 错误消息
-	Type    string `json:"type,omitempty"`    // 错误类型（如 invalid_request_error）
-	Code    string `json:"code,omitempty"`    // 错误码
-	Param   string `json:"param,omitempty"`   // 相关参数
+	Message string `json:"message,omitempty"`  // 错误消息
+	Type    string `json:"type,omitempty"`     // 错误类型（如 invalid_request_error）
+	Code    string `json:"code,omitempty"`     // 错误码
+	Param   string `json:"param,omitempty"`    // 相关参数
 	EventID string `json:"event_id,omitempty"` // 触发错误的客户端事件ID
 }
 
@@ -284,7 +284,7 @@ type ServerSession struct {
 	Voice                   Voice                    `json:"voice,omitempty"`                      // 音色
 	InputAudioFormat        AudioFormat              `json:"input_audio_format,omitempty"`         // 输入音频格式
 	OutputAudioFormat       AudioFormat              `json:"output_audio_format,omitempty"`        // 输出音频格式
-	InputAudioTranscription *InputAudioTranscription `json:"input_audio_transcription,omitempty"` // 输入转写配置
+	InputAudioTranscription *InputAudioTranscription `json:"input_audio_transcription,omitempty"`  // 输入转写配置
 	TurnDetection           *TurnDetection           `json:"turn_detection,omitempty"`             // 断句检测配置
 	Tools                   []Tool                   `json:"tools,omitempty"`                      // 可用工具
 	Temperature             float32                  `json:"temperature,omitempty"`                // 采样温度
@@ -299,21 +299,32 @@ type Conversation struct {
 	Object string `json:"object"` // 对象类型（realtime.conversation）
 }
 
+// TokenUsageDetails 是 OpenAI usage 中的模态明细。
+// 不同模型返回的明细字段可能不完整，未返回时保持 0，由 billing 层标记明细来源。
+type TokenUsageDetails struct {
+	TextTokens      int `json:"text_tokens,omitempty"`      // 文本 token
+	AudioTokens     int `json:"audio_tokens,omitempty"`     // 音频 token
+	CachedTokens    int `json:"cached_tokens,omitempty"`    // 命中缓存的输入 token
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"` // 推理 token（部分模型可能返回）
+}
+
 // Usage Token 使用统计
 type Usage struct {
-	TotalTokens  int `json:"total_tokens"`  // 总 token 数
-	InputTokens  int `json:"input_tokens"`  // 输入 token 数
-	OutputTokens int `json:"output_tokens"` // 输出 token 数
+	TotalTokens        int                `json:"total_tokens"`                   // 总 token 数
+	InputTokens        int                `json:"input_tokens"`                   // 输入 token 数
+	OutputTokens       int                `json:"output_tokens"`                  // 输出 token 数
+	InputTokenDetails  *TokenUsageDetails `json:"input_token_details,omitempty"`  // 输入 token 明细
+	OutputTokenDetails *TokenUsageDetails `json:"output_token_details,omitempty"` // 输出 token 明细
 }
 
 // Response 响应结构
 type Response struct {
-	ID            string               `json:"id"`                       // 响应ID
-	Object        string               `json:"object"`                   // 对象类型
-	Status        ResponseStatus       `json:"status"`                   // 响应状态
-	StatusDetails any                  `json:"status_details,omitempty"` // 状态详情
-	Output        []ResponseMessageItem `json:"output"`                  // 输出条目列表
-	Usage         *Usage               `json:"usage,omitempty"`          // Token 使用统计
+	ID            string                `json:"id"`                       // 响应ID
+	Object        string                `json:"object"`                   // 对象类型
+	Status        ResponseStatus        `json:"status"`                   // 响应状态
+	StatusDetails any                   `json:"status_details,omitempty"` // 状态详情
+	Output        []ResponseMessageItem `json:"output"`                   // 输出条目列表
+	Usage         *Usage                `json:"usage,omitempty"`          // Token 使用统计
 }
 
 // RateLimit 速率限制信息

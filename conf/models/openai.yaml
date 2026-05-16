@@ -12,7 +12,21 @@ rate_rps: 10
 rate_burst: 20
 max_session_ttl: 3600
 organization: ""
-extra: {}
+extra:
+  # function_call 工具执行超时，避免天气/地图/知识库供应商卡住 Realtime 会话。
+  tool_timeout_ms: 8000
+  # OpenWeather：配置 API Key 后 get_open_weather 会真实调用 OpenWeather。
+  open_weather_api_key: "${OPEN_WEATHERMAP_API_KEY}"
+  open_weather_endpoint: "https://api.openweathermap.org/data/2.5"
+  # TOZO 知识库：可配置自建检索接口，或配置 OpenAI Vector Store ID 走官方检索接口。
+  tozo_knowledge_endpoint: "${TOZO_KNOWLEDGE_ENDPOINT}"
+  tozo_knowledge_api_key: "${TOZO_KNOWLEDGE_API_KEY}"
+  tozo_vector_store_id: "${TOZO_VECTOR_STORE_ID}"
+  tozo_knowledge_max_results: 3
+  # 地图导航：当前 Go 侧已实现 Mapbox 执行器；Amap/Google 保留同名配置位后续扩展。
+  default_map_sdk: "mapbox"
+  mapbox_api_key: "${MAPBOX_MAP_API_KEY}"
+  mapbox_endpoint: "https://api.mapbox.com/search/searchbox/v1"
 
 # OpenAI Realtime 专属配置。
 realtime:

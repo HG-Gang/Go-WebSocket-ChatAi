@@ -9,10 +9,11 @@
 //   - 全局 billing.enabled 开关控制
 //
 // Redis Key 设计：
-//   billing:duration:{model}:{module}:{userID}  → Hash（音频时长）
-//   billing:daily_duration:{model}:{date}       → String（每日音频总时长）
-//   billing:{model}:{sessionID}                 → Hash（Token 消耗）
-//   billing:daily:{model}:{date}                → String（每日 Token 总消耗）
+//
+//	billing:duration:{model}:{module}:{userID}  → Hash（音频时长）
+//	billing:daily_duration:{model}:{date}       → String（每日音频总时长）
+//	billing:{model}:{sessionID}                 → Hash（Token 消耗）
+//	billing:daily:{model}:{date}                → String（每日 Token 总消耗）
 package billing
 
 import (
@@ -145,8 +146,38 @@ func GetDailyDuration(model, date string) (int64, error) {
 
 // ======================== Token 消耗计费 ========================
 
+// TokenUsageDetail 是一次 OpenAI response.done 返回的 token 明细。
+// 如果上游没有返回 text/audio 拆分，调用方会把 DetailSource 标记为 usage_total_only，前端据此提示“只有总量”。
+type TokenUsageDetail struct {
+	ResponseID        string
+	InputTokens       int
+	OutputTokens      int
+	TotalTokens       int
+	InputTextTokens   int
+	InputAudioTokens  int
+	OutputTextTokens  int
+	OutputAudioTokens int
+	CachedTokens      int
+	ReasoningTokens   int
+	DetailSource      string
+}
+
 // RecordTokenUsage 记录 Token 消耗
 func RecordTokenUsage(model, sessionID, userID string, input, output int) error {
+	return RecordTokenUsageDetail(model, sessionID, userID, TokenUsageDetail{
+		InputTokens:  input,
+		OutputTokens: output,
+		TotalTokens:  input + output,
+		DetailSource: "usage_total_only",
+	})
+}
+
+// RecordTokenUsageDetail 记录一次 response 维度的 Token 消耗明细。
+// 写入三类 Redis key：
+//   - billing:{model}:{sessionID}：会话累计，兼容旧逻辑。
+//   - billing:response:{model}:{sessionID}:{responseID}：单次 response 明细。
+//   - billing:daily_detail:{model}:{date}：每日 token/text/audio 汇总。
+func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDetail) error {
 	if conf.Global == nil || !conf.Global.Billing.Enabled {
 		return nil
 	}
@@ -160,32 +191,87 @@ func RecordTokenUsage(model, sessionID, userID string, input, output int) error 
 	if client == nil {
 		return nil // Redis 未启用，静默跳过
 	}
+	if detail.TotalTokens <= 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
+	}
+	if detail.DetailSource == "" {
+		detail.DetailSource = "usage_detail"
+	}
 
 	keyPrefix := fmt.Sprintf("billing:%s:%s", model, sessionID)
 
 	pipe := client.Pipeline()
-	pipe.HIncrBy(ctx, keyPrefix, "input_tokens", int64(input))
-	pipe.HIncrBy(ctx, keyPrefix, "output_tokens", int64(output))
-	pipe.HIncrBy(ctx, keyPrefix, "total_tokens", int64(input+output))
+	pipe.HIncrBy(ctx, keyPrefix, "input_tokens", int64(detail.InputTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "output_tokens", int64(detail.OutputTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "total_tokens", int64(detail.TotalTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "input_text_tokens", int64(detail.InputTextTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "input_audio_tokens", int64(detail.InputAudioTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "output_text_tokens", int64(detail.OutputTextTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "output_audio_tokens", int64(detail.OutputAudioTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "cached_tokens", int64(detail.CachedTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "reasoning_tokens", int64(detail.ReasoningTokens))
+	pipe.HIncrBy(ctx, keyPrefix, "response_count", 1)
+	pipe.HSet(ctx, keyPrefix, "user_id", userID)
+	pipe.HSet(ctx, keyPrefix, "last_response_id", detail.ResponseID)
+	pipe.HSet(ctx, keyPrefix, "token_detail_source", detail.DetailSource)
 	pipe.HSet(ctx, keyPrefix, "last_used", time.Now().Unix())
 
 	today := time.Now().Format("2006-01-02")
 	dailyKey := fmt.Sprintf("billing:daily:%s:%s", model, today)
-	pipe.IncrBy(ctx, dailyKey, int64(input+output))
+	pipe.IncrBy(ctx, dailyKey, int64(detail.TotalTokens))
 	pipe.Expire(ctx, dailyKey, 32*24*time.Hour)
+	dailyDetailKey := fmt.Sprintf("billing:daily_detail:%s:%s", model, today)
+	pipe.HIncrBy(ctx, dailyDetailKey, "input_tokens", int64(detail.InputTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "output_tokens", int64(detail.OutputTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "total_tokens", int64(detail.TotalTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "input_text_tokens", int64(detail.InputTextTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "input_audio_tokens", int64(detail.InputAudioTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "output_text_tokens", int64(detail.OutputTextTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "output_audio_tokens", int64(detail.OutputAudioTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "cached_tokens", int64(detail.CachedTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "reasoning_tokens", int64(detail.ReasoningTokens))
+	pipe.HIncrBy(ctx, dailyDetailKey, "response_count", 1)
+	pipe.HSet(ctx, dailyDetailKey, "last_session_id", sessionID)
+	pipe.HSet(ctx, dailyDetailKey, "last_response_id", detail.ResponseID)
+	pipe.HSet(ctx, dailyDetailKey, "last_updated", time.Now().Unix())
+	pipe.Expire(ctx, dailyDetailKey, 32*24*time.Hour)
+
+	if detail.ResponseID != "" {
+		responseKey := fmt.Sprintf("billing:response:%s:%s:%s", model, sessionID, detail.ResponseID)
+		pipe.HSet(ctx, responseKey, map[string]interface{}{
+			"model":               model,
+			"session_id":          sessionID,
+			"user_id":             userID,
+			"response_id":         detail.ResponseID,
+			"input_tokens":        detail.InputTokens,
+			"output_tokens":       detail.OutputTokens,
+			"total_tokens":        detail.TotalTokens,
+			"input_text_tokens":   detail.InputTextTokens,
+			"input_audio_tokens":  detail.InputAudioTokens,
+			"output_text_tokens":  detail.OutputTextTokens,
+			"output_audio_tokens": detail.OutputAudioTokens,
+			"cached_tokens":       detail.CachedTokens,
+			"reasoning_tokens":    detail.ReasoningTokens,
+			"detail_source":       detail.DetailSource,
+			"created_at":          time.Now().Unix(),
+		})
+		pipe.Expire(ctx, responseKey, 32*24*time.Hour)
+	}
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		logger.GetModelLogger(model).Error("记录 Token 消耗失败",
 			zap.String("session_id", sessionID),
+			zap.String("response_id", detail.ResponseID),
 			zap.Error(err))
 		return err
 	}
 
 	logger.GetModelLogger(model).Debug("Token 消耗已记录",
 		zap.String("session_id", sessionID),
-		zap.Int("input", input),
-		zap.Int("output", output))
+		zap.String("response_id", detail.ResponseID),
+		zap.Int("input", detail.InputTokens),
+		zap.Int("output", detail.OutputTokens))
 
 	return nil
 }

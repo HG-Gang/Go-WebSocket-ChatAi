@@ -239,6 +239,18 @@
             </p>
             <div class="form-grid">
                 <div class="form-group">
+                    <label for="complete-response-filter">响应筛选</label>
+                    <select id="complete-response-filter">
+                        <option value="all">全部响应</option>
+                        <option value="streaming">生成中</option>
+                        <option value="done">已完成</option>
+                        <option value="error">错误响应</option>
+                        <option value="text">包含文本</option>
+                        <option value="transcript">包含转写</option>
+                        <option value="audio">包含音频</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label for="complete-response-list">响应列表</label>
                     <select id="complete-response-list"></select>
                 </div>
@@ -260,8 +272,23 @@
             <h2>7. 实时日志</h2>
             <div class="log-toolbar">
                 <label><input type="checkbox" id="log-auto-scroll" checked> 自动滚动</label>
-                <label><input type="checkbox" id="log-show-heartbeat"> 显示心跳日志</label>
-                <label><input type="checkbox" id="log-show-raw" checked> 显示原始数据</label>
+                <label for="log-level-filter">日志级别</label>
+                <select id="log-level-filter">
+                    <option value="normal">常规（隐藏心跳）</option>
+                    <option value="all">全部</option>
+                    <option value="info">info</option>
+                    <option value="warn">warn</option>
+                    <option value="error">error</option>
+                    <option value="send">send</option>
+                    <option value="recv">recv</option>
+                    <option value="heartbeat">heartbeat</option>
+                </select>
+                <label for="log-raw-filter">原始数据</label>
+                <select id="log-raw-filter">
+                    <option value="show">显示</option>
+                    <option value="hide">隐藏</option>
+                </select>
+                <input type="text" id="log-text-filter" placeholder="按关键字筛选日志">
                 <button class="btn btn-sm" id="btn-clear-log">清空日志</button>
                 <button class="btn btn-sm" id="btn-export-log">导出日志</button>
             </div>

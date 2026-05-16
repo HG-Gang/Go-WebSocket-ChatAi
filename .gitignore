@@ -9,6 +9,7 @@ server_debug.exe~
 
 # 本地临时目录和构建缓存
 .tmp/
+.gocache/
 vendor/
 
 # 编辑器和系统文件
