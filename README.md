@@ -1,6 +1,6 @@
 # Go-WebSocket-ChatAi
 
-TozoAI Go WebSocket 网关项目，用 Go 重写旧 PHP Webman/Gateway WebSocket 项目的核心链路，面向 App / 耳机实时语音聊天、OpenAI Realtime、OpenAI Responses、Azure OpenAI Realtime 与 Azure 普通 HTTP 能力代理。
+Go WebSocket 网关项目，用 Go 重写旧 PHP Webman/Gateway WebSocket 项目的核心链路，面向 App / 耳机实时语音聊天、OpenAI Realtime、OpenAI Responses、Azure OpenAI Realtime 与 Azure 普通 HTTP 能力代理。
 
 项目重点是解决长时间 WebSocket 聊天中常见的无响应、反复断链、上游 active response 冲突、心跳不清晰、日志和监控不足等问题。
 
