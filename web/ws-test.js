@@ -248,6 +248,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // 消息类型切换时自动填充模板
     dom.msgType().addEventListener('change', fillTemplate);
 
+    // 用户问题输入框变化时，同步到高级调试 JSON 的 text 字段
+    // 仅在 msg-type 为 conversation.item.create / legacy.text 时同步，避免覆盖其他消息体
+    dom.quickTextInput().addEventListener('input', syncQuickTextToMsgBody);
+
     // 初始填充模板
     fillTemplate();
     initTheme();
@@ -810,6 +814,53 @@ function fillTemplate() {
     }
 }
 
+/**
+ * 把“用户问题”输入框的内容实时同步到高级调试 JSON 的 text 字段。
+ * 仅处理 conversation.item.create / legacy.text 两种消息体（它们包含 text 字段），
+ * 优先在当前 JSON 上原地更新，保留用户对其他字段的手动编辑；
+ * 如果当前 JSON 已经不合法或结构和模板对不上，再回退到 fillTemplate 重新填充。
+ */
+function syncQuickTextToMsgBody() {
+    const type = dom.msgType().value;
+    if (type !== 'conversation.item.create' && type !== 'legacy.text') {
+        return;
+    }
+
+    const userText = dom.quickTextInput().value;
+    const body = dom.msgBody().value.trim();
+    if (!body) {
+        fillTemplate();
+        return;
+    }
+
+    let parsed;
+    try {
+        parsed = JSON.parse(body);
+    } catch {
+        return;
+    }
+
+    if (type === 'conversation.item.create') {
+        if (parsed && parsed.item && Array.isArray(parsed.item.content)
+            && parsed.item.content[0] && typeof parsed.item.content[0].text === 'string') {
+            parsed.item.content[0].text = userText;
+            dom.msgBody().value = JSON.stringify(parsed, null, 2);
+        } else {
+            fillTemplate();
+        }
+        return;
+    }
+
+    if (type === 'legacy.text') {
+        if (parsed && typeof parsed.content === 'string') {
+            parsed.content = userText;
+            dom.msgBody().value = JSON.stringify(parsed, null, 2);
+        } else {
+            fillTemplate();
+        }
+    }
+}
+
 // ======================== 链路统计 ========================
 
 function getResponseId(data) {
@@ -1136,9 +1187,9 @@ function filteredResponseRecords() {
 
 function responseStatusText(status) {
     switch (status) {
-        case 'streaming': return '生成中';
-        case 'done': return '已完成';
-        case 'error': return '错误';
+        case 'streaming': return '生成中（response.created）';
+        case 'done': return '已完成（response.done）';
+        case 'error': return '错误（error）';
         default: return status || '-';
     }
 }
@@ -1146,12 +1197,12 @@ function responseStatusText(status) {
 function responseFilterText(filter) {
     const names = {
         all: '全部响应',
-        streaming: '生成中',
-        done: '已完成',
-        error: '错误响应',
-        text: '包含文本',
-        transcript: '包含转写',
-        audio: '包含音频'
+        streaming: '生成中（response.created）',
+        done: '已完成（response.done）',
+        error: '错误响应（error）',
+        text: '包含文本（response.text.delta）',
+        transcript: '包含转写（response.audio_transcript.delta）',
+        audio: '包含音频（response.audio.delta）'
     };
     return names[filter] || filter;
 }
@@ -1327,7 +1378,7 @@ function log(level, tag, msg) {
     entry.dataset.search = `${level} ${tag} ${msg}`.toLowerCase();
 
     const time = formatTime(Date.now());
-    entry.innerHTML = `<span class="log-time">[${time}]</span><span class="log-tag">[${tag}]</span><span class="log-msg">${escapeHtml(msg)}</span>`;
+    entry.innerHTML = `<span class="log-time">[${time}]</span><span class="log-level">[${level}]</span><span class="log-tag">[${tag}]</span><span class="log-msg">${escapeHtml(msg)}</span>`;
 
     container.appendChild(entry);
     applyLogFilterToEntry(entry);
@@ -1352,7 +1403,7 @@ function logRawData(data) {
     entry.className = 'log-entry raw';
     entry.dataset.level = 'raw';
     entry.dataset.search = data.toLowerCase();
-    entry.innerHTML = `<span class="log-data">${escapeHtml(data)}</span>`;
+    entry.innerHTML = `<span class="log-level">[raw]</span><span class="log-data">${escapeHtml(data)}</span>`;
     container.appendChild(entry);
     applyLogFilterToEntry(entry);
 
