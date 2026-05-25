@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TozoAI WebSocket 测试面板</title>
-    <link rel="stylesheet" href="style.css?v=20260525-realtime-ga">
+    <link rel="stylesheet" href="style.css?v=20260525-svc-config">
 </head>
 <body>
     <div class="container">
@@ -30,6 +30,110 @@
                 </select>
             </div>
         </header>
+
+        <!-- 当前服务配置（实际从后端 yaml 读取） -->
+        <section class="panel" id="service-config-panel">
+            <h2>0. 当前服务配置（实际生效）</h2>
+            <p class="hint">
+                以下信息直接从 Go 服务的 <code>/api/debug/status</code> 实时读取，反映当前 yaml 实际加载到内存里的配置；
+                API Key 已脱敏（仅显示前缀和末 4 位用于核对）。<strong>切换上方 WebSocket 地址（openai/azure）后会自动刷新显示对应模型。</strong>
+            </p>
+            <div class="form-grid" style="margin-bottom:8px;">
+                <div class="form-group">
+                    <label for="service-config-provider">当前模型</label>
+                    <select id="service-config-provider">
+                        <option value="auto">跟随 WebSocket 地址自动判断</option>
+                        <option value="openai">openai（强制查看）</option>
+                        <option value="azureai">azureai（强制查看）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>最近刷新</label>
+                    <div>
+                        <span id="service-config-updated">-</span>
+                        <button class="btn btn-sm inline-btn" id="btn-refresh-service-config" type="button">立即刷新</button>
+                    </div>
+                </div>
+            </div>
+            <div class="status-grid" id="service-config-grid">
+                <div class="status-card">
+                    <span class="status-label">模型 key</span>
+                    <span class="status-value" id="svc-cfg-model-key">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">启用状态</span>
+                    <span class="status-value" id="svc-cfg-enabled">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">默认模型</span>
+                    <span class="status-value" id="svc-cfg-default-model">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">默认语音 voice</span>
+                    <span class="status-value" id="svc-cfg-voice">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">API Key（脱敏）</span>
+                    <span class="status-value" id="svc-cfg-api-key" title="实际加载的 API Key 前缀 + 末 4 位 + 长度，用于核对当前用的是哪一把 Key">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">Organization</span>
+                    <span class="status-value" id="svc-cfg-org">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">上游 WS URL</span>
+                    <span class="status-value" id="svc-cfg-ws-url" style="font-size:12px;">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">上游 HTTP Endpoint</span>
+                    <span class="status-value" id="svc-cfg-endpoint" style="font-size:12px;">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">代理来源</span>
+                    <span class="status-value" id="svc-cfg-proxy-source" title="config = 来自 yaml realtime.proxy_url；env = 来自 HTTPS_PROXY 环境变量；none = 直连">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">代理（实际生效）</span>
+                    <span class="status-value" id="svc-cfg-proxy-effective" style="font-size:12px;">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">限流 RPS / Burst</span>
+                    <span class="status-value"><span id="svc-cfg-rate-rps">-</span> / <span id="svc-cfg-rate-burst">-</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">会话最长存活</span>
+                    <span class="status-value" id="svc-cfg-max-ttl">-</span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">App Ping/Pong</span>
+                    <span class="status-value"><span id="svc-cfg-app-ping">-</span> / <span id="svc-cfg-app-pong">-</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">上游 Ping/Pong</span>
+                    <span class="status-value"><span id="svc-cfg-api-ping">-</span> / <span id="svc-cfg-api-pong">-</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">上游读/写超时</span>
+                    <span class="status-value"><span id="svc-cfg-api-read">-</span> / <span id="svc-cfg-api-write">-</span></span>
+                </div>
+                <div class="status-card">
+                    <span class="status-label">恢复会话 / 历史上限</span>
+                    <span class="status-value"><span id="svc-cfg-restore">-</span> / <span id="svc-cfg-restore-limit">-</span></span>
+                </div>
+                <div class="status-card" id="svc-cfg-extra-card-1" hidden>
+                    <span class="status-label" id="svc-cfg-extra-label-1">-</span>
+                    <span class="status-value" id="svc-cfg-extra-value-1">-</span>
+                </div>
+                <div class="status-card" id="svc-cfg-extra-card-2" hidden>
+                    <span class="status-label" id="svc-cfg-extra-label-2">-</span>
+                    <span class="status-value" id="svc-cfg-extra-value-2">-</span>
+                </div>
+            </div>
+            <div class="form-group" style="margin-top:8px;">
+                <label>系统提示 instructions（前 200 字预览）</label>
+                <pre id="svc-cfg-instructions" style="background:rgba(0,0,0,.18);padding:8px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto;">-</pre>
+            </div>
+        </section>
 
         <!-- 连接配置区 -->
         <section class="panel" id="config-panel">
@@ -322,6 +426,6 @@
         </div>
     </div>
 
-    <script src="ws-test.js?v=20260525-realtime-ga"></script>
+    <script src="ws-test.js?v=20260525-svc-config"></script>
 </body>
 </html>
