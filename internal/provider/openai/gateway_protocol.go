@@ -67,10 +67,13 @@ type gatewayClientContext struct {
 // gatewayAdapter 是旧 Events.php 与 SceneChatHandler 输入侧逻辑的 Go 替代实现。
 // 它同时接收 OpenAI 原生客户端事件，以及使用 msgType、content、historyContent 字段的 TOZO 旧 App 协议。
 type gatewayAdapter struct {
-	mu          sync.Mutex
-	snapshot    gatewaySessionSnapshot
-	context     gatewayClientContext
+	mu sync.Mutex
+	snapshot gatewaySessionSnapshot
+	context gatewayClientContext
 	lastMsgType string
+	// 当前会话是否已经向上游发送过任何 session.update（无论来自旧 msgType 流还是原生事件透传）。
+	// 一旦为 true，原生 OpenAI 事件分支不再自动 prepend session.update，避免覆盖用户手动配置。
+	sessionUpdateEmitted bool
 }
 
 func newGatewayAdapter() *gatewayAdapter {
@@ -131,9 +134,7 @@ func (g *gatewayAdapter) buildClientPlan(data []byte, cfg *OpenAIConfig, session
 			})
 			return gatewayClientPlan{appMessages: [][]byte{msg}, reason: "app_ping"}, err
 		}
-		// OpenAI Realtime 原生客户端事件。
-		// 原样保留字节内容，让已支持官方协议的 App 客户端无需经过 msgType 转换。
-		return gatewayClientPlan{openAIEvents: [][]byte{append([]byte(nil), data...)}, reason: typ}, nil
+		return g.planRawOpenAIEvent(raw, data, cfg, typ)
 	}
 
 	msgType := rawString(raw, "msgType")
@@ -406,32 +407,75 @@ func (g *gatewayAdapter) sessionUpdateIfNeeded(raw map[string]json.RawMessage, c
 		return nil, nil
 	}
 	g.snapshot = gatewaySessionSnapshot{voice: voice, instructions: instructions, mode: mode, toolsHash: toolsHash}
+	g.sessionUpdateEmitted = true
 	g.mu.Unlock()
 
 	payload := map[string]any{
-		"type": "session.update",
-		"session": map[string]any{
-			"type":              "realtime",
-			"instructions":      instructions,
-			"output_modalities": []string{"audio"},
-			"audio": map[string]any{
-				"input": map[string]any{
-					"turn_detection": nil,
-					"transcription":  map[string]any{"model": "whisper-1"},
-				},
-				"output": map[string]any{
-					"voice": voice,
-				},
-			},
-			"tools":       tools,
-			"tool_choice": "auto",
-		},
+		"type":    "session.update",
+		"session": buildSessionPayload(cfg, instructions, voice, tools),
 	}
 	data, err := marshalJSON(payload)
 	if err != nil {
 		return nil, err
 	}
 	return [][]byte{data}, nil
+}
+
+// buildSessionPayload 组装 session.update 的 session 子对象。
+// 该结构遵循 OpenAI Realtime GA 文档要求：必须显式 type=realtime、声明 model、
+// 以及把音频格式 / 语音 / VAD 嵌套到 audio.input、audio.output 下。
+func buildSessionPayload(cfg *OpenAIConfig, instructions, voice string, tools []any) map[string]any {
+	session := map[string]any{
+		"type":              "realtime",
+		"model":             cfg.GetDefaultModel(),
+		"instructions":      instructions,
+		"output_modalities": []string{"audio"},
+		"audio": map[string]any{
+			"input": map[string]any{
+				"format":         map[string]any{"type": "audio/pcm", "rate": 24000},
+				"turn_detection": nil,
+				"transcription":  map[string]any{"model": "whisper-1"},
+			},
+			"output": map[string]any{
+				"format": map[string]any{"type": "audio/pcm"},
+				"voice":  voice,
+			},
+		},
+		"tools":       tools,
+		"tool_choice": "auto",
+	}
+	return session
+}
+
+// planRawOpenAIEvent 处理已经是 OpenAI Realtime 原生事件（带 type 字段）的 App 数据。
+//
+// 兼容性：保留原本的「原样透传」语义，让已支持官方协议的 App 客户端无需经过 msgType 转换。
+// 升级点：在本会话第一次出现非 session.update 的原生事件时，先自动 prepend 一条
+// GA 风格的 session.update，确保 instructions / tools / voice 等基础配置生效；
+// 用户自己发过 session.update 后，后续不再注入，避免覆盖用户手动配置。
+func (g *gatewayAdapter) planRawOpenAIEvent(raw map[string]json.RawMessage, data []byte, cfg *OpenAIConfig, typ string) (gatewayClientPlan, error) {
+	passthrough := append([]byte(nil), data...)
+
+	if typ == string(protocol.ClientEventTypeSessionUpdate) {
+		g.mu.Lock()
+		g.sessionUpdateEmitted = true
+		g.mu.Unlock()
+		return gatewayClientPlan{openAIEvents: [][]byte{passthrough}, reason: typ}, nil
+	}
+
+	g.mu.Lock()
+	alreadyEmitted := g.sessionUpdateEmitted
+	g.mu.Unlock()
+	if alreadyEmitted {
+		return gatewayClientPlan{openAIEvents: [][]byte{passthrough}, reason: typ}, nil
+	}
+
+	injected, err := g.sessionUpdateIfNeeded(raw, cfg, "")
+	if err != nil {
+		return gatewayClientPlan{}, err
+	}
+	events := append(injected, passthrough)
+	return gatewayClientPlan{openAIEvents: events, reason: typ}, nil
 }
 
 func defaultTOZOInstructions() string {
