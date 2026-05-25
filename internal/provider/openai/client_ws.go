@@ -56,6 +56,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -258,9 +259,28 @@ func (c *Client) Connect(ctx context.Context) error {
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = c.cfg.GetApiWriteTimeout()
 
+	// 显式代理：当 realtime.proxy_url 在 yaml 中配置时强制走该代理，避免依赖进程环境变量。
+	// 留空时维持 websocket.DefaultDialer.Proxy = http.ProxyFromEnvironment 的默认行为。
+	proxySource := "env"
+	if configuredProxy := c.cfg.GetProxyURL(); configuredProxy != "" {
+		parsed, perr := url.Parse(configuredProxy)
+		if perr != nil {
+			err := fmt.Errorf("解析 realtime.proxy_url 失败: %w", perr)
+			c.log.Error("无效的 realtime.proxy_url 配置",
+				zap.String("provider", c.Name()),
+				zap.String("proxy_url", configuredProxy),
+				zap.Error(perr))
+			metrics.OpenAIConnectResult(c.sessionID, err)
+			return err
+		}
+		dialer.Proxy = http.ProxyURL(parsed)
+		proxySource = "config"
+	}
+
 	c.log.Info("正在连接 Realtime 上游",
 		zap.String("provider", c.Name()),
-		zap.String("url", fullURL))
+		zap.String("url", fullURL),
+		zap.String("proxy_source", proxySource))
 	conn, _, err := dialer.DialContext(ctx, fullURL, header)
 	if err != nil {
 		c.log.Error("连接 Realtime 上游失败", zap.String("provider", c.Name()), zap.Error(err))

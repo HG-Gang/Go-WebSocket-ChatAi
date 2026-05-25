@@ -212,18 +212,44 @@ func buildDebugNetworkStatus() gin.H {
 	// gorilla/websocket 会继承 net/http.ProxyFromEnvironment；
 	// 因此 wss/https 上游请求实际生效的是 HTTPS_PROXY。
 	// HTTP_PROXY 只对 ws/http 目标生效。
-	effectiveOpenAIProxy := httpsProxy
+
+	// 优先级：yaml realtime.proxy_url > HTTPS_PROXY 环境变量 > 直连。
+	// 这里独立计算 openai / azure 两个模型的实际拨号代理，便于排障。
+	openaiProxy, openaiSource := resolveModelProxy("openai", httpsProxy)
+	azureProxy, azureSource := resolveModelProxy("azureai", httpsProxy)
 
 	return gin.H{
 		"http_proxy":             maskProxyURL(httpProxy),
 		"https_proxy":            maskProxyURL(httpsProxy),
 		"all_proxy":              maskProxyURL(allProxy),
 		"no_proxy":               noProxy,
-		"openai_proxy_effective": maskProxyURL(effectiveOpenAIProxy),
-		"openai_proxy_enabled":   effectiveOpenAIProxy != "",
-		"azure_proxy_effective":  maskProxyURL(effectiveOpenAIProxy),
-		"azure_proxy_enabled":    effectiveOpenAIProxy != "",
+		"openai_proxy_effective": maskProxyURL(openaiProxy),
+		"openai_proxy_enabled":   openaiProxy != "",
+		"openai_proxy_source":    openaiSource,
+		"azure_proxy_effective":  maskProxyURL(azureProxy),
+		"azure_proxy_enabled":    azureProxy != "",
+		"azure_proxy_source":     azureSource,
 	}
+}
+
+// resolveModelProxy 计算指定模型 Realtime 拨号实际使用的代理。
+// 返回 (effectiveProxy, source)：source ∈ {"config","env","none"}。
+// 与 client_ws.go Connect() 的代理决策保持一致。
+func resolveModelProxy(modelKey, envProxy string) (string, string) {
+	return resolveProxy(conf.GetModel(modelKey), envProxy)
+}
+
+// resolveProxy 是 resolveModelProxy 的纯函数版本，便于单测，不依赖全局 conf 状态。
+func resolveProxy(cfg *conf.ModelConfig, envProxy string) (string, string) {
+	if cfg != nil {
+		if cp := strings.TrimSpace(cfg.Realtime.ProxyURL); cp != "" {
+			return cp, "config"
+		}
+	}
+	if env := strings.TrimSpace(envProxy); env != "" {
+		return env, "env"
+	}
+	return "", "none"
 }
 
 func buildDebugOpenAIStatus() gin.H {
@@ -253,6 +279,8 @@ func buildDebugOpenAIStatus() gin.H {
 			"restore_session":       cfg.Realtime.RestoreSession,
 			"restore_history_limit": intOrDefault(cfg.Realtime.RestoreHistoryLimit, 32),
 			"send_queue_timeout_ms": intOrDefault(cfg.Realtime.SendQueueTimeoutMs, 250),
+			"proxy_url":             maskProxyURL(strings.TrimSpace(cfg.Realtime.ProxyURL)),
+			"proxy_configured":      strings.TrimSpace(cfg.Realtime.ProxyURL) != "",
 		},
 	}
 }
@@ -305,6 +333,8 @@ func buildDebugAzureStatus() gin.H {
 			"restore_session":       cfg.Realtime.RestoreSession,
 			"restore_history_limit": intOrDefault(cfg.Realtime.RestoreHistoryLimit, 32),
 			"send_queue_timeout_ms": intOrDefault(cfg.Realtime.SendQueueTimeoutMs, 250),
+			"proxy_url":             maskProxyURL(strings.TrimSpace(cfg.Realtime.ProxyURL)),
+			"proxy_configured":      strings.TrimSpace(cfg.Realtime.ProxyURL) != "",
 		},
 		"planned_modules": []string{
 			"realtime",

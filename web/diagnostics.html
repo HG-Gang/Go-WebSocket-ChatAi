@@ -158,7 +158,7 @@
         <section class="panel">
             <h2>网络代理</h2>
             <div class="metric-grid">
-                <div class="metric"><div class="label">OpenAI 代理</div><div class="value" id="n-openai">-</div><div class="sub">wss/https 使用 HTTPS_PROXY</div></div>
+                <div class="metric"><div class="label">OpenAI 代理</div><div class="value" id="n-openai">-</div><div class="sub" id="n-openai-detail">优先级：yaml realtime.proxy_url &gt; HTTPS_PROXY</div></div>
                 <div class="metric"><div class="label">HTTP_PROXY</div><div class="value" id="n-http">-</div></div>
                 <div class="metric"><div class="label">HTTPS_PROXY</div><div class="value" id="n-https">-</div></div>
                 <div class="metric"><div class="label">NO_PROXY</div><div class="value" id="n-no">-</div></div>
@@ -383,6 +383,12 @@ function renderDebug(payload, health) {
     renderSwitch('f-fallback', features.fallback_enabled);
 
     renderSwitch('n-openai', network.openai_proxy_enabled);
+    const proxySourceLabel = network.openai_proxy_source === 'config'
+        ? `来源：yaml realtime.proxy_url（${network.openai_proxy_effective || '已配置'}）`
+        : network.openai_proxy_source === 'env'
+            ? `来源：HTTPS_PROXY 环境变量（${network.openai_proxy_effective || '已配置'}）`
+            : '未配置代理（直连 api.openai.com）';
+    text('n-openai-detail', proxySourceLabel);
     text('n-http', network.http_proxy || '-');
     text('n-https', network.https_proxy || '-');
     text('n-no', network.no_proxy || '-');

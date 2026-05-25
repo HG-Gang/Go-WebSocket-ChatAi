@@ -337,6 +337,17 @@ func (c *OpenAIConfig) GetSendQueueTimeout() time.Duration {
 	return 250 * time.Millisecond
 }
 
+// GetProxyURL 获取 Realtime WS 拨号代理地址。
+// 仅返回 yaml 中显式配置的 realtime.proxy_url（空字符串表示未配置）。
+// 上游环境变量回退由 net/http 在 Dialer.Proxy 未设置时自动处理，这里不直接读 env，
+// 以保证 yaml 配置永远是「显式优先」的唯一信号源、便于 /api/debug/status 准确反映来源。
+func (c *OpenAIConfig) GetProxyURL() string {
+	if c == nil || c.ModelConfig == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Realtime.ProxyURL)
+}
+
 // GetToolTimeout 获取 function_call 工具执行超时。
 // 工具调用发生在 OpenAI 等待 function_call_output 的阶段，时间过长会让用户觉得卡顿；
 // 默认 8 秒，生产环境可以按天气、地图、知识库供应商的 SLA 在 extra.tool_timeout_ms 调整。

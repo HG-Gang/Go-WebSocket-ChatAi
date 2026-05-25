@@ -38,3 +38,6 @@ realtime:
   restore_session: true
   restore_history_limit: 32
   send_queue_timeout_ms: 250
+  # 上游拨号代理（可选）。留空 = 使用 HTTPS_PROXY 环境变量。
+  # 国内开发机一般可直连 Azure；如需走代理，示例：proxy_url: "http://127.0.0.1:7890"
+  proxy_url: ""
