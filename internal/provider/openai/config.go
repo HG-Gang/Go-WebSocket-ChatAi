@@ -151,7 +151,9 @@ func (c *OpenAIConfig) BuildRealtimeURL() (string, error) {
 }
 
 // BuildRealtimeHeader 生成 Realtime 上游握手请求头。
-// Azure 使用 api-key；OpenAI 使用 Bearer + OpenAI-Beta。
+// Azure 使用 api-key；OpenAI GA 只需要 Bearer 鉴权。
+// 历史上 OpenAI Realtime Preview 要求带 `OpenAI-Beta: realtime=v1`，
+// 2025 年 GA 的迁移指南明确要求不再发送该 header，因此这里已移除。
 func (c *OpenAIConfig) BuildRealtimeHeader() http.Header {
 	header := http.Header{}
 	if c.IsAzure() {
@@ -159,7 +161,6 @@ func (c *OpenAIConfig) BuildRealtimeHeader() http.Header {
 		return header
 	}
 	header.Set("Authorization", "Bearer "+c.APIKey)
-	header.Set("OpenAI-Beta", "realtime=v1")
 	if c.Organization != "" {
 		header.Set("OpenAI-Organization", c.Organization)
 	}

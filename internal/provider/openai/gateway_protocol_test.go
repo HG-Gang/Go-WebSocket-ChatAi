@@ -67,6 +67,145 @@ func TestGatewayAdapterPlansLegacyText(t *testing.T) {
 	}
 }
 
+func TestSessionUpdatePayloadIsGAShape(t *testing.T) {
+	cfg := NewOpenAIConfig(&conf.ModelConfig{
+		DefaultModel: "gpt-realtime",
+		Instructions: "test instructions",
+		Voice:        "alloy",
+	})
+	plan, err := newGatewayAdapter().buildClientPlan(
+		[]byte(`{"msgType":"text","content":"hello"}`), cfg, "session-1")
+	if err != nil {
+		t.Fatalf("buildClientPlan returned error: %v", err)
+	}
+	if len(plan.openAIEvents) == 0 {
+		t.Fatalf("openAIEvents is empty")
+	}
+
+	var sessionEvent struct {
+		Type    string `json:"type"`
+		Session struct {
+			Type             string   `json:"type"`
+			Model            string   `json:"model"`
+			OutputModalities []string `json:"output_modalities"`
+			Audio            struct {
+				Input struct {
+					Format         map[string]any `json:"format"`
+					TurnDetection  any            `json:"turn_detection"`
+					Transcription  map[string]any `json:"transcription"`
+				} `json:"input"`
+				Output struct {
+					Format map[string]any `json:"format"`
+					Voice  string         `json:"voice"`
+				} `json:"output"`
+			} `json:"audio"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(plan.openAIEvents[0], &sessionEvent); err != nil {
+		t.Fatalf("decode session.update: %v", err)
+	}
+	if sessionEvent.Type != "session.update" {
+		t.Fatalf("first event type = %q, want session.update", sessionEvent.Type)
+	}
+	if sessionEvent.Session.Type != "realtime" {
+		t.Fatalf("session.type = %q, want realtime", sessionEvent.Session.Type)
+	}
+	if sessionEvent.Session.Model != "gpt-realtime" {
+		t.Fatalf("session.model = %q, want gpt-realtime", sessionEvent.Session.Model)
+	}
+	if len(sessionEvent.Session.OutputModalities) != 1 || sessionEvent.Session.OutputModalities[0] != "audio" {
+		t.Fatalf("session.output_modalities = %v, want [audio]", sessionEvent.Session.OutputModalities)
+	}
+	if sessionEvent.Session.Audio.Input.Format == nil || sessionEvent.Session.Audio.Input.Format["type"] != "audio/pcm" {
+		t.Fatalf("audio.input.format = %v, want type audio/pcm", sessionEvent.Session.Audio.Input.Format)
+	}
+	if sessionEvent.Session.Audio.Output.Format == nil || sessionEvent.Session.Audio.Output.Format["type"] != "audio/pcm" {
+		t.Fatalf("audio.output.format = %v, want type audio/pcm", sessionEvent.Session.Audio.Output.Format)
+	}
+	if sessionEvent.Session.Audio.Output.Voice != "alloy" {
+		t.Fatalf("audio.output.voice = %q, want alloy", sessionEvent.Session.Audio.Output.Voice)
+	}
+}
+
+func TestGatewayAdapterAutoInjectsSessionUpdateForRawEvent(t *testing.T) {
+	cfg := NewOpenAIConfig(&conf.ModelConfig{
+		DefaultModel: "gpt-realtime",
+		Instructions: "test instructions",
+		Voice:        "alloy",
+	})
+	adapter := newGatewayAdapter()
+
+	raw := []byte(`{"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}`)
+	plan, err := adapter.buildClientPlan(raw, cfg, "session-1")
+	if err != nil {
+		t.Fatalf("buildClientPlan returned error: %v", err)
+	}
+	if len(plan.openAIEvents) != 2 {
+		t.Fatalf("openAIEvents len = %d, want 2 (session.update + raw event)", len(plan.openAIEvents))
+	}
+
+	var first map[string]any
+	if err := json.Unmarshal(plan.openAIEvents[0], &first); err != nil {
+		t.Fatalf("decode first event: %v", err)
+	}
+	if first["type"] != "session.update" {
+		t.Fatalf("first event type = %v, want session.update", first["type"])
+	}
+
+	var second map[string]any
+	if err := json.Unmarshal(plan.openAIEvents[1], &second); err != nil {
+		t.Fatalf("decode second event: %v", err)
+	}
+	if second["type"] != "conversation.item.create" {
+		t.Fatalf("second event type = %v, want conversation.item.create", second["type"])
+	}
+
+	// 第二次再发原生事件，不应再注入 session.update
+	raw2 := []byte(`{"type":"response.create"}`)
+	plan2, err := adapter.buildClientPlan(raw2, cfg, "session-1")
+	if err != nil {
+		t.Fatalf("second buildClientPlan returned error: %v", err)
+	}
+	if len(plan2.openAIEvents) != 1 {
+		t.Fatalf("second plan openAIEvents len = %d, want 1 (no re-injection)", len(plan2.openAIEvents))
+	}
+}
+
+func TestGatewayAdapterSkipsAutoInjectAfterUserSessionUpdate(t *testing.T) {
+	cfg := NewOpenAIConfig(&conf.ModelConfig{
+		DefaultModel: "gpt-realtime",
+		Instructions: "test instructions",
+		Voice:        "alloy",
+	})
+	adapter := newGatewayAdapter()
+
+	// 用户主动发 session.update，应原样透传，且后续不再注入
+	userSess := []byte(`{"type":"session.update","session":{"type":"realtime","model":"gpt-realtime","instructions":"custom"}}`)
+	plan, err := adapter.buildClientPlan(userSess, cfg, "session-1")
+	if err != nil {
+		t.Fatalf("buildClientPlan returned error: %v", err)
+	}
+	if len(plan.openAIEvents) != 1 {
+		t.Fatalf("openAIEvents len = %d, want 1", len(plan.openAIEvents))
+	}
+	var got map[string]any
+	if err := json.Unmarshal(plan.openAIEvents[0], &got); err != nil {
+		t.Fatalf("decode session.update: %v", err)
+	}
+	if got["type"] != "session.update" {
+		t.Fatalf("event type = %v, want session.update", got["type"])
+	}
+
+	raw := []byte(`{"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}`)
+	plan2, err := adapter.buildClientPlan(raw, cfg, "session-1")
+	if err != nil {
+		t.Fatalf("second buildClientPlan returned error: %v", err)
+	}
+	if len(plan2.openAIEvents) != 1 {
+		t.Fatalf("second plan openAIEvents len = %d, want 1 (user already configured session)", len(plan2.openAIEvents))
+	}
+}
+
 func TestGatewayAdapterInjectsLegacyToolsForTextCommand(t *testing.T) {
 	cfg := NewOpenAIConfig(&conf.ModelConfig{Instructions: "test instructions", Voice: "alloy"})
 	adapter := newGatewayAdapter()

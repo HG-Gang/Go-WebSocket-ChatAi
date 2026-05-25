@@ -127,26 +127,38 @@ const dom = {
 
 // ======================== 消息模板 ========================
 const templates = {
+    // 2025 年 OpenAI Realtime GA 模板：
+    // session 必须显式带 type=realtime，并把音频格式 / VAD / 语音都挪到 audio.input / audio.output 下，
+    // 顶层 modalities 改名为 output_modalities，单值数组。详见 OpenAI Realtime GA 迁移指南。
     'session.update': {
         type: 'session.update',
         session: {
-            modalities: ['text', 'audio'],
+            type: 'realtime',
+            model: 'gpt-realtime',
+            output_modalities: ['audio'],
             instructions: '你是一个智能助手，请用中文回答用户的问题。',
-            voice: 'alloy',
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            turn_detection: {
-                type: 'server_vad',
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 500
+            audio: {
+                input: {
+                    format: { type: 'audio/pcm', rate: 24000 },
+                    turn_detection: {
+                        type: 'server_vad',
+                        threshold: 0.5,
+                        prefix_padding_ms: 300,
+                        silence_duration_ms: 500
+                    },
+                    transcription: { model: 'whisper-1' }
+                },
+                output: {
+                    format: { type: 'audio/pcm' },
+                    voice: 'alloy'
+                }
             }
         }
     },
     'response.create': {
         type: 'response.create',
         response: {
-            modalities: ['text', 'audio']
+            output_modalities: ['audio']
         }
     },
     'response.cancel': {
