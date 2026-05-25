@@ -467,16 +467,28 @@ textarea {
     color: var(--text-muted);
     margin-right: 4px;
 }
+.log-level {
+    margin-right: 4px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
 .log-tag {
     margin-right: 4px;
     font-weight: 600;
 }
+.log-entry.info .log-level,
 .log-entry.info .log-tag { color: var(--accent-blue); }
+.log-entry.warn .log-level,
 .log-entry.warn .log-tag { color: var(--accent-yellow); }
+.log-entry.error .log-level,
 .log-entry.error .log-tag { color: var(--accent-red); }
+.log-entry.send .log-level,
 .log-entry.send .log-tag { color: var(--accent-purple); }
+.log-entry.recv .log-level,
 .log-entry.recv .log-tag { color: var(--accent-green); }
+.log-entry.heartbeat .log-level,
 .log-entry.heartbeat .log-tag { color: var(--text-muted); }
+.log-entry.raw .log-level { color: var(--text-muted); }
 
 .log-data {
     display: block;

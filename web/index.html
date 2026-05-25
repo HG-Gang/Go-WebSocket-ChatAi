@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TozoAI WebSocket 测试面板</title>
-    <link rel="stylesheet" href="style.css?v=20260515-send-events">
+    <link rel="stylesheet" href="style.css?v=20260525-panel-ux">
 </head>
 <body>
     <div class="container">
@@ -242,12 +242,12 @@
                     <label for="complete-response-filter">响应筛选</label>
                     <select id="complete-response-filter">
                         <option value="all">全部响应</option>
-                        <option value="streaming">生成中</option>
-                        <option value="done">已完成</option>
-                        <option value="error">错误响应</option>
-                        <option value="text">包含文本</option>
-                        <option value="transcript">包含转写</option>
-                        <option value="audio">包含音频</option>
+                        <option value="streaming">生成中（response.created）</option>
+                        <option value="done">已完成（response.done）</option>
+                        <option value="error">错误响应（error）</option>
+                        <option value="text">包含文本（response.text.delta）</option>
+                        <option value="transcript">包含转写（response.audio_transcript.delta）</option>
+                        <option value="audio">包含音频（response.audio.delta）</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -322,6 +322,6 @@
         </div>
     </div>
 
-    <script src="ws-test.js?v=20260515-send-events"></script>
+    <script src="ws-test.js?v=20260525-panel-ux"></script>
 </body>
 </html>
