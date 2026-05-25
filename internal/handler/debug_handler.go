@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -259,12 +260,19 @@ func buildDebugOpenAIStatus() gin.H {
 	}
 
 	return gin.H{
+		"model_key":               "openai",
 		"enabled":                 cfg.Enabled,
 		"default_model":           stringOrDefault(cfg.DefaultModel, "gpt-realtime"),
+		"instructions":            cfg.Instructions,
 		"endpoint":                cfg.Endpoint,
 		"voice":                   cfg.Voice,
 		"api_key_configured":      strings.TrimSpace(cfg.APIKey) != "",
+		"api_key_masked":          maskAPIKey(cfg.APIKey),
 		"organization_configured": strings.TrimSpace(cfg.Organization) != "",
+		"organization":            cfg.Organization,
+		"rate_rps":                cfg.RateRPS,
+		"rate_burst":              cfg.RateBurst,
+		"max_session_ttl":         cfg.MaxSessionTTL,
 		"ws_url":                  stringOrDefault(cfg.Realtime.WsUrl, "wss://api.openai.com/v1/realtime"),
 		"realtime": gin.H{
 			"name":                  cfg.Realtime.Name,
@@ -301,12 +309,19 @@ func buildDebugAzureStatus() gin.H {
 		extra = map[string]interface{}{}
 	}
 	return gin.H{
+		"model_key":               "azureai",
 		"enabled":                 cfg.Enabled,
 		"default_model":           cfg.DefaultModel,
+		"instructions":            cfg.Instructions,
 		"endpoint":                cfg.Endpoint,
 		"voice":                   cfg.Voice,
 		"api_key_configured":      strings.TrimSpace(cfg.APIKey) != "",
+		"api_key_masked":          maskAPIKey(cfg.APIKey),
 		"organization_configured": strings.TrimSpace(cfg.Organization) != "",
+		"organization":            cfg.Organization,
+		"rate_rps":                cfg.RateRPS,
+		"rate_burst":              cfg.RateBurst,
+		"max_session_ttl":         cfg.MaxSessionTTL,
 		"deployment_name":         stringFromExtra(extra, "deployment_name"),
 		"api_version":             stringFromExtra(extra, "api_version"),
 		"chat_deployment":         stringFromExtra(extra, "chat_deployment"),
@@ -404,4 +419,36 @@ func maskProxyURL(raw string) string {
 		parsed.User = url.UserPassword(username, "******")
 	}
 	return parsed.String()
+}
+
+// maskAPIKey 用于 /api/debug/status 等只读诊断接口输出 API Key 的脱敏字符串。
+// 设计目标：用户能在测试面板上 一眼对照出当前用的是哪一把 Key
+// （多账号 / 多项目情况下排障必备），同时不泄漏完整密钥。
+//
+//	空                                              -> "未配置"
+//	<=8 字符                                        -> "***（长度=N）"  // 太短大概率是占位符
+//	"sk-proj-1234567890abcdefghijklmn"              -> "sk-proj...klmn（长度=34）"
+//	其他形式（如 Azure 32 位 hex）                 -> 前 4 + ... + 末 4 + 长度
+func maskAPIKey(raw string) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return "未配置"
+	}
+	n := len(key)
+	if n <= 8 {
+		return fmt.Sprintf("***（长度=%d）", n)
+	}
+	// 优先保留 OpenAI 风格的可识别前缀（sk-、sk-proj-、sk-svcacct- 等）。
+	prefix := key[:4]
+	for _, p := range []string{"sk-proj-", "sk-svcacct-", "sk-admin-", "sk-"} {
+		if strings.HasPrefix(key, p) && n > len(p)+4 {
+			prefix = p
+			break
+		}
+	}
+	if len(prefix) > n-4 {
+		prefix = key[:n-4]
+	}
+	suffix := key[n-4:]
+	return fmt.Sprintf("%s...%s（长度=%d）", prefix, suffix, n)
 }

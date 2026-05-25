@@ -407,7 +407,7 @@ function renderDebug(payload, health) {
     text('o-ws', openai.ws_url || '-');
     text('o-endpoint', openai.endpoint || '-');
     text('o-voice', openai.voice || '-');
-    text('o-key', openai.api_key_configured ? 'API Key 已配置' : 'API Key 缺失');
+    text('o-key', openai.api_key_configured ? `API Key: ${openai.api_key_masked || '已配置'}` : 'API Key 缺失');
     text('o-app-heartbeat', `${realtime.app_ping_interval || '-'} / ${realtime.app_pong_timeout || '-'}`);
     text('o-api-timeout', `${realtime.api_read_timeout || '-'} / ${realtime.api_write_timeout || '-'}`);
     text('o-reconnect', `${number(realtime.reconnect_max_retries)} / ${realtime.reconnect_delay || '-'}`);
@@ -422,7 +422,7 @@ function renderDebug(payload, health) {
     text('resp-store', responses.store_default ? '默认保存响应' : '默认不保存响应');
 
     renderSwitch('az-enabled', azure.enabled);
-    text('az-key', azure.api_key_configured ? 'API Key 已配置' : 'API Key 缺失');
+    text('az-key', azure.api_key_configured ? `API Key: ${azure.api_key_masked || '已配置'}` : 'API Key 缺失');
     text('az-endpoint', azure.endpoint || '-');
     text('az-api-version', azure.api_version ? `api-version=${azure.api_version}` : 'api-version 未配置');
     text('az-realtime', azure.realtime_deployment || azure.deployment_name || azure.default_model || '-');

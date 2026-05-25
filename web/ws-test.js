@@ -123,6 +123,38 @@ const dom = {
     completeResponseMeta: () => document.getElementById('complete-response-meta'),
     completeResponseContent: () => document.getElementById('complete-response-content'),
     btnClearResponses: () => document.getElementById('btn-clear-responses'),
+    // 服务配置面板
+    svcCfgProvider:       () => document.getElementById('service-config-provider'),
+    svcCfgUpdated:        () => document.getElementById('service-config-updated'),
+    btnRefreshSvcCfg:     () => document.getElementById('btn-refresh-service-config'),
+    svcCfgModelKey:       () => document.getElementById('svc-cfg-model-key'),
+    svcCfgEnabled:        () => document.getElementById('svc-cfg-enabled'),
+    svcCfgDefaultModel:   () => document.getElementById('svc-cfg-default-model'),
+    svcCfgVoice:          () => document.getElementById('svc-cfg-voice'),
+    svcCfgApiKey:         () => document.getElementById('svc-cfg-api-key'),
+    svcCfgOrg:            () => document.getElementById('svc-cfg-org'),
+    svcCfgWsUrl:          () => document.getElementById('svc-cfg-ws-url'),
+    svcCfgEndpoint:       () => document.getElementById('svc-cfg-endpoint'),
+    svcCfgProxySource:    () => document.getElementById('svc-cfg-proxy-source'),
+    svcCfgProxyEffective: () => document.getElementById('svc-cfg-proxy-effective'),
+    svcCfgRateRps:        () => document.getElementById('svc-cfg-rate-rps'),
+    svcCfgRateBurst:      () => document.getElementById('svc-cfg-rate-burst'),
+    svcCfgMaxTtl:         () => document.getElementById('svc-cfg-max-ttl'),
+    svcCfgAppPing:        () => document.getElementById('svc-cfg-app-ping'),
+    svcCfgAppPong:        () => document.getElementById('svc-cfg-app-pong'),
+    svcCfgApiPing:        () => document.getElementById('svc-cfg-api-ping'),
+    svcCfgApiPong:        () => document.getElementById('svc-cfg-api-pong'),
+    svcCfgApiRead:        () => document.getElementById('svc-cfg-api-read'),
+    svcCfgApiWrite:       () => document.getElementById('svc-cfg-api-write'),
+    svcCfgRestore:        () => document.getElementById('svc-cfg-restore'),
+    svcCfgRestoreLimit:   () => document.getElementById('svc-cfg-restore-limit'),
+    svcCfgInstructions:   () => document.getElementById('svc-cfg-instructions'),
+    svcCfgExtraCard1:     () => document.getElementById('svc-cfg-extra-card-1'),
+    svcCfgExtraLabel1:    () => document.getElementById('svc-cfg-extra-label-1'),
+    svcCfgExtraValue1:    () => document.getElementById('svc-cfg-extra-value-1'),
+    svcCfgExtraCard2:     () => document.getElementById('svc-cfg-extra-card-2'),
+    svcCfgExtraLabel2:    () => document.getElementById('svc-cfg-extra-label-2'),
+    svcCfgExtraValue2:    () => document.getElementById('svc-cfg-extra-value-2'),
 };
 
 // ======================== 消息模板 ========================
@@ -264,12 +296,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // 仅在 msg-type 为 conversation.item.create / legacy.text 时同步，避免覆盖其他消息体
     dom.quickTextInput().addEventListener('input', syncQuickTextToMsgBody);
 
+    // 服务配置面板：切换模型 / 刷新 / WS 地址变更时重绘
+    dom.svcCfgProvider().addEventListener('change', renderServiceConfig);
+    dom.btnRefreshSvcCfg().addEventListener('click', fetchServiceConfig);
+    dom.wsUrl().addEventListener('change', renderServiceConfig);
+    dom.wsUrl().addEventListener('input', renderServiceConfig);
+
     // 初始填充模板
     fillTemplate();
     initTheme();
     updateEventStatsUI();
     updateCompleteResponseUI();
     startHealthPolling();
+    startServiceConfigPolling();
 
     // 从 URL 参数读取 userId 并自动填充（如 ?userId=1001）
     const urlParams = new URLSearchParams(window.location.search);
@@ -1506,4 +1545,124 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// ======================== 服务配置面板 ========================
+
+/**
+ * 根据 WS 地址自动判断当前所选模型。
+ * ws://host/ws/realtime/azure → "azureai"
+ * 其他 → "openai"
+ */
+function detectProviderFromWsUrl() {
+    const url = (dom.wsUrl().value || '').toLowerCase();
+    if (url.includes('/azure') || url.includes('/azureai')) return 'azureai';
+    return 'openai';
+}
+
+/**
+ * 获取当前应显示哪个模型的配置（用户手动选 > 跟随 WS 地址）。
+ */
+function getActiveProvider() {
+    const sel = dom.svcCfgProvider().value;
+    if (sel === 'auto') return detectProviderFromWsUrl();
+    return sel;
+}
+
+let _svcCfgCache = null; // 缓存最近一次 /api/debug/status 响应
+let _svcCfgTimer = null;
+
+/**
+ * 拉取 /api/debug/status 并刷新面板。
+ */
+async function fetchServiceConfig() {
+    try {
+        const resp = await fetch(`${getHttpBaseURL()}/api/debug/status`, { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        _svcCfgCache = json.data || json;
+        renderServiceConfig();
+    } catch (err) {
+        setText(dom.svcCfgModelKey(), '获取失败');
+        setText(dom.svcCfgApiKey(), err.message);
+    }
+}
+
+/**
+ * 渲染服务配置面板。
+ */
+function renderServiceConfig() {
+    if (!_svcCfgCache) return;
+    const provider = getActiveProvider();
+    const modelData = (provider === 'azureai') ? _svcCfgCache.azure : _svcCfgCache.openai;
+    const networkData = _svcCfgCache.network || {};
+
+    if (!modelData) {
+        setText(dom.svcCfgModelKey(), `${provider}（后端未返回此模型数据）`);
+        return;
+    }
+
+    const rt = modelData.realtime || {};
+
+    setText(dom.svcCfgModelKey(), modelData.model_key || provider);
+    setText(dom.svcCfgEnabled(), modelData.enabled ? 'ON' : 'OFF');
+    setText(dom.svcCfgDefaultModel(), modelData.default_model || '-');
+    setText(dom.svcCfgVoice(), modelData.voice || '-');
+    setText(dom.svcCfgApiKey(), modelData.api_key_masked || (modelData.api_key_configured ? '已配置（无脱敏字段）' : '未配置'));
+    setText(dom.svcCfgOrg(), modelData.organization || '-');
+    setText(dom.svcCfgWsUrl(), (provider === 'azureai' ? rt.ws_url : modelData.ws_url) || '-');
+    setText(dom.svcCfgEndpoint(), modelData.endpoint || '-');
+
+    // 代理
+    const proxyKey = (provider === 'azureai') ? 'azure' : 'openai';
+    const proxySource = networkData[`${proxyKey}_proxy_source`] || (rt.proxy_configured ? 'config' : 'none');
+    const proxyEffective = networkData[`${proxyKey}_proxy_effective`] || rt.proxy_url || '-';
+    setText(dom.svcCfgProxySource(), proxySource);
+    setText(dom.svcCfgProxyEffective(), proxyEffective);
+
+    // 限流与 TTL
+    setText(dom.svcCfgRateRps(), modelData.rate_rps ?? '-');
+    setText(dom.svcCfgRateBurst(), modelData.rate_burst ?? '-');
+    setText(dom.svcCfgMaxTtl(), modelData.max_session_ttl || '-');
+
+    // Realtime 心跳参数
+    setText(dom.svcCfgAppPing(), rt.app_ping_interval || '-');
+    setText(dom.svcCfgAppPong(), rt.app_pong_timeout || '-');
+    setText(dom.svcCfgApiPing(), rt.api_ping_interval || '-');
+    setText(dom.svcCfgApiPong(), rt.api_pong_timeout || '-');
+    setText(dom.svcCfgApiRead(), rt.api_read_timeout || '-');
+    setText(dom.svcCfgApiWrite(), rt.api_write_timeout || '-');
+    setText(dom.svcCfgRestore(), rt.restore_session ? 'ON' : 'OFF');
+    setText(dom.svcCfgRestoreLimit(), rt.restore_history_limit ?? '-');
+
+    // instructions
+    const instr = (modelData.instructions || '').trim();
+    dom.svcCfgInstructions().textContent = instr ? (instr.length > 200 ? instr.slice(0, 200) + '...' : instr) : '（未配置）';
+
+    // Azure extra fields
+    const extra1 = dom.svcCfgExtraCard1();
+    const extra2 = dom.svcCfgExtraCard2();
+    if (provider === 'azureai') {
+        if (modelData.deployment_name || modelData.realtime_deployment) {
+            extra1.hidden = false;
+            setText(dom.svcCfgExtraLabel1(), 'Deployment');
+            setText(dom.svcCfgExtraValue1(), modelData.realtime_deployment || modelData.deployment_name || '-');
+        }
+        if (modelData.api_version) {
+            extra2.hidden = false;
+            setText(dom.svcCfgExtraLabel2(), 'API Version');
+            setText(dom.svcCfgExtraValue2(), modelData.api_version || '-');
+        }
+    } else {
+        extra1.hidden = true;
+        extra2.hidden = true;
+    }
+
+    setText(dom.svcCfgUpdated(), new Date().toLocaleTimeString());
+}
+
+function startServiceConfigPolling() {
+    fetchServiceConfig();
+    if (_svcCfgTimer) clearInterval(_svcCfgTimer);
+    _svcCfgTimer = setInterval(fetchServiceConfig, 10000);
 }
