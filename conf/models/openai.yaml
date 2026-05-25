@@ -45,3 +45,8 @@ realtime:
   restore_session: true
   restore_history_limit: 32
   send_queue_timeout_ms: 250
+  # 上游拨号代理（可选）。留空时使用 HTTPS_PROXY / HTTP_PROXY 环境变量；
+  # 显式配置后强制走该代理，国内开发机无法直连 api.openai.com 时直接在这里指定 Clash / V2Ray 监听端口即可，
+  # 无需重启 GoLand 或修改用户级环境变量。支持 http://、https://、socks5://。
+  # 示例：proxy_url: "http://127.0.0.1:7890"
+  proxy_url: ""

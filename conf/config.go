@@ -47,6 +47,12 @@ type ModelConfig struct {
 		RestoreSession      bool `mapstructure:"restore_session"`       // OpenAI 重连后是否自动恢复 session.update 和最近上下文
 		RestoreHistoryLimit int  `mapstructure:"restore_history_limit"` // 重连恢复时最多重放的 conversation.item.* 事件数
 		SendQueueTimeoutMs  int  `mapstructure:"send_queue_timeout_ms"` // App 下行队列满时最多等待毫秒数
+
+		// ProxyURL 显式指定 Realtime WS 拨号代理（如 "http://127.0.0.1:7890" 或 "socks5://127.0.0.1:1080"）。
+		// 留空时回退到 HTTPS_PROXY / HTTP_PROXY / NO_PROXY 等系统环境变量。
+		// 优先级：配置 > 环境变量。设计目的：在国内无法直连 api.openai.com 时无需依赖
+		// 进程环境变量（GoLand 重启、setx 持久化等容易出错），改由 yaml 直接控制。
+		ProxyURL string `mapstructure:"proxy_url"`
 	} `mapstructure:"realtime"`
 }
 
