@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper" // 配置读取核心库
 )
@@ -75,6 +76,10 @@ func Load() error {
 	// 7. 替换配置中的环境变量占位符（${ENV_VAR} → 实际值）
 	replaceEnvPlaceholders()
 
+	if err := validateProductionConfig(Global); err != nil {
+		return err
+	}
+
 	// 8. 初始化模型配置缓存（加速GetModel调用）
 	InitModelConfig()
 
@@ -134,6 +139,40 @@ func cloneModelConfigMap(src map[string]ModelConfig) map[string]ModelConfig {
 		dst[name] = cfg
 	}
 	return dst
+}
+
+func validateProductionConfig(cfg *GlobalConfig) error {
+	if cfg == nil || cfg.Env != "prod" {
+		return nil
+	}
+	if cfg.JWT.Enabled && strings.TrimSpace(cfg.JWT.Secret) == "" {
+		return fmt.Errorf("prod requires jwt.secret")
+	}
+	if cfg.Security.PublicTokenEnabled {
+		return fmt.Errorf("prod cannot enable security.public_token_enabled")
+	}
+	if cfg.Security.PublicDebugEnabled {
+		return fmt.Errorf("prod cannot enable security.public_debug_enabled")
+	}
+	if len(cfg.Security.AllowedOrigins) == 0 {
+		return fmt.Errorf("prod requires security.allowed_origins")
+	}
+	if cfg.Security.AllowUpstreamQueryKey {
+		return fmt.Errorf("prod cannot enable security.allow_upstream_query_key")
+	}
+	if cfg.Redis.Enabled && strings.TrimSpace(cfg.Redis.Addr) == "" {
+		return fmt.Errorf("prod requires redis.addr when redis.enabled is true")
+	}
+	if strings.TrimSpace(cfg.Logs.RootDir) == "" {
+		return fmt.Errorf("prod requires logs.root_dir")
+	}
+	if cfg.Logs.RetentionDays <= 0 {
+		return fmt.Errorf("prod requires logs.retention_days > 0")
+	}
+	if _, err := time.ParseDuration(cfg.Logs.CleanupInterval); err != nil {
+		return fmt.Errorf("prod requires valid logs.cleanup_interval: %w", err)
+	}
+	return nil
 }
 
 // applyRootModelOverride 合并根配置里的模型覆盖项。

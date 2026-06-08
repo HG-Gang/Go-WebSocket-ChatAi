@@ -30,7 +30,7 @@ extra:
 
 # OpenAI Realtime 专属配置。
 realtime:
-  ws_url: "wss://api.openai.com/v1/realtime"
+  ws_url: "wss://dxb.huifei.net/v1/realtime"
   reconnect_max_retries: 3
   reconnect_delay: "1s"
   # App↔Go 心跳配置。

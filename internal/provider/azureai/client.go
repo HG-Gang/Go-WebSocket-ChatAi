@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"TozoAI-Chat-Api/conf"
+	"TozoAI-Chat-Api/internal/logger"
 )
 
 const (
@@ -80,7 +81,7 @@ func (c *Client) Do(ctx context.Context, capability string, contentType string, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求 Azure OpenAI 失败: %w", err)
+		return nil, fmt.Errorf("请求 Azure OpenAI 失败: endpoint=%s error=%s", logger.SafeURLForDisplay(upstreamURL), logger.RedactField("content", err.Error()))
 	}
 	return resp, nil
 }
@@ -94,7 +95,7 @@ func Status(cfg *conf.ModelConfig) map[string]any {
 	deploymentName := deploymentFor(cfg, "")
 	return map[string]any{
 		"enabled":            cfg.Enabled,
-		"endpoint":           cfg.Endpoint,
+		"endpoint":           logger.SafeURLForDisplay(cfg.Endpoint),
 		"default_model":      cfg.DefaultModel,
 		"api_key_configured": strings.TrimSpace(cfg.APIKey) != "",
 		"api_version":        apiVersion,

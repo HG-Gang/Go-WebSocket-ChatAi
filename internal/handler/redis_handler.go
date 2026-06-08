@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ type RedisKeyInfo struct {
 	Category    string      `json:"category"`
 	Description string      `json:"description"`
 	Value       interface{} `json:"value"`
+	ValueSafe   bool        `json:"value_safe"`
 }
 
 func RedisKeysHandler(c *gin.Context) {
@@ -88,14 +91,16 @@ func RedisKeysHandler(c *gin.Context) {
 			if err != nil {
 				info.Value = "error: " + err.Error()
 			} else {
-				info.Value = val
+				info.Value = sanitizeRedisValue(key, "", val)
+				info.ValueSafe = true
 			}
 		case "hash":
 			val, err := client.HGetAll(ctx, key).Result()
 			if err != nil {
 				info.Value = "error: " + err.Error()
 			} else {
-				info.Value = val
+				info.Value = sanitizeRedisHash(key, val)
+				info.ValueSafe = true
 			}
 		case "list":
 			stop := int64(99)
@@ -106,14 +111,16 @@ func RedisKeysHandler(c *gin.Context) {
 			if err != nil {
 				info.Value = "error: " + err.Error()
 			} else {
-				info.Value = val
+				info.Value = sanitizeRedisStrings(key, "item", val)
+				info.ValueSafe = true
 			}
 		case "set":
 			val, err := client.SMembers(ctx, key).Result()
 			if err != nil {
 				info.Value = "error: " + err.Error()
 			} else {
-				info.Value = val
+				info.Value = sanitizeRedisStrings(key, "member", val)
+				info.ValueSafe = true
 			}
 		case "zset":
 			stop := int64(99)
@@ -124,10 +131,19 @@ func RedisKeysHandler(c *gin.Context) {
 			if err != nil {
 				info.Value = "error: " + err.Error()
 			} else {
-				info.Value = val
+				items := make([]map[string]interface{}, 0, len(val))
+				for _, item := range val {
+					items = append(items, map[string]interface{}{
+						"score":  item.Score,
+						"member": sanitizeRedisValue(key, "member", item.Member),
+					})
+				}
+				info.Value = items
+				info.ValueSafe = true
 			}
 		default:
 			info.Value = "(unsupported type)"
+			info.ValueSafe = true
 		}
 
 		result = append(result, info)
@@ -140,6 +156,150 @@ func RedisKeysHandler(c *gin.Context) {
 		"total":  len(result),
 		"full":   fullValue,
 	})
+}
+
+func sanitizeRedisHash(key string, values map[string]string) map[string]interface{} {
+	out := make(map[string]interface{}, len(values))
+	for field, value := range values {
+		out[field] = sanitizeRedisValue(key, field, value)
+	}
+	return out
+}
+
+func sanitizeRedisStrings(key, field string, values []string) []interface{} {
+	out := make([]interface{}, 0, len(values))
+	for _, value := range values {
+		out = append(out, sanitizeRedisValue(key, field, value))
+	}
+	return out
+}
+
+func sanitizeRedisValue(key, field string, value interface{}) interface{} {
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" {
+		return value
+	}
+	if isSafeRedisValue(key, field, text) {
+		return value
+	}
+	return redactedRedisValue(text)
+}
+
+func isSafeRedisValue(key, field, value string) bool {
+	if isSensitiveRedisKey(key) || isSensitiveRedisField(field) {
+		return false
+	}
+	if looksLikeSecret(value) {
+		return false
+	}
+	if isNumericString(value) {
+		return true
+	}
+	field = strings.ToLower(strings.TrimSpace(field))
+	for _, safe := range []string{
+		"model",
+		"status",
+		"type",
+		"category",
+		"detail_source",
+		"token_detail_source",
+		"source",
+		"provider",
+		"request_id",
+		"response_id",
+		"last_response_id",
+		"session_id",
+		"last_session_id",
+		"user_id",
+		"user_name",
+		"device_id",
+		"remote_addr",
+		"ip_location",
+		"user_agent",
+	} {
+		if field == safe {
+			return true
+		}
+	}
+	return len(value) <= 80 && !strings.Contains(value, "\n")
+}
+
+func isSensitiveRedisKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return false
+	}
+	if strings.HasPrefix(key, "billing:") || strings.HasPrefix(key, "session:") || strings.Contains(key, "rate_limit") {
+		return false
+	}
+	for _, marker := range redisSensitiveMarkers() {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveRedisField(field string) bool {
+	field = strings.ToLower(strings.TrimSpace(field))
+	if field == "" {
+		return false
+	}
+	for _, marker := range redisSensitiveMarkers() {
+		if strings.Contains(field, marker) {
+			return true
+		}
+	}
+	for _, marker := range []string{"content", "diff", "payload", "raw", "body", "arguments", "history"} {
+		if strings.Contains(field, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func redisSensitiveMarkers() []string {
+	return []string{
+		"api_key",
+		"apikey",
+		"access_token",
+		"authorization",
+		"bearer",
+		"jwt",
+		"secret",
+		"webhook",
+		"password",
+		"private_key",
+		"credential",
+	}
+}
+
+func looksLikeSecret(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range redisSensitiveMarkers() {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return strings.HasPrefix(value, "sk-") ||
+		strings.HasPrefix(value, "eyJ") ||
+		strings.Contains(value, "Bearer ") ||
+		strings.Contains(value, "access_token=")
+}
+
+func isNumericString(value string) bool {
+	if value == "" {
+		return false
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return true
+	}
+	return false
+}
+
+func redactedRedisValue(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("[REDACTED redis_value len=%d sha256:%x]", len(value), sum[:6])
 }
 
 func explainRedisKey(key string) (category, description string) {

@@ -79,6 +79,12 @@ func Register(name string, factory ProviderFactory) {
 func Create(name string) Provider {
 	// 获取模型配置
 	cfg := conf.GetModel(name)
+	return CreateWithConfig(name, cfg)
+}
+
+// CreateWithConfig 使用调用方提供的模型配置创建 Provider。
+// 适用于单次连接临时覆盖上游地址、API Key 或模型，不写回全局配置。
+func CreateWithConfig(name string, cfg *conf.ModelConfig) Provider {
 	if cfg == nil || !cfg.Enabled {
 		return nil // 模型未配置或未启用
 	}

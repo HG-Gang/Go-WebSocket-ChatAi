@@ -4,10 +4,14 @@
 package metrics
 
 import (
+	"net"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"TozoAI-Chat-Api/internal/service/stats"
 )
 
 const (
@@ -33,12 +37,50 @@ const (
 type collector struct {
 	mu       sync.Mutex
 	started  time.Time
+	counters hotCounters
 	app      appMetrics
 	goStats  goMetrics
 	openai   openAIMetrics
 	errors   errorMetrics
 	business businessMetrics
 	sessions map[string]*sessionMetrics
+}
+
+// hotCounters 保存 WebSocket 热路径上的纯累计指标。
+// 这些字段只做自增或最近值覆盖，不依赖 map、slice 或会话时间线，因此使用 atomic 可避免所有连接争用 global.mu。
+type hotCounters struct {
+	appBytesOut           atomic.Uint64
+	appSlowConsumerDrops  atomic.Uint64
+	goCapacityRejected    atomic.Uint64
+	goAPISendTimeouts     atomic.Uint64
+	goSendQueueTimeouts   atomic.Uint64
+	goCriticalTimeouts    atomic.Uint64
+	lastSendQueueLen      atomic.Int64
+	lastSendQueueCap      atomic.Int64
+	lastAPISendQueueLen   atomic.Int64
+	lastAPISendQueueCap   atomic.Int64
+	openAIPingSent        atomic.Uint64
+	openAIPingFailures    atomic.Uint64
+	openAIClientEvents    atomic.Uint64
+	openAIServerEvents    atomic.Uint64
+	openAIResponseCreated atomic.Uint64
+	openAIResponseDone    atomic.Uint64
+	openAIResponseOK      atomic.Uint64
+	openAIResponseCancel  atomic.Uint64
+	openAIResponseFailed  atomic.Uint64
+	openAITextChars       atomic.Uint64
+	openAITranscriptChars atomic.Uint64
+	openAIAudioBytes      atomic.Uint64
+	openAIAudioPackets    atomic.Uint64
+	businessInputAudioMs  atomic.Uint64
+	businessOutputAudioMs atomic.Uint64
+	businessInputTokens   atomic.Uint64
+	businessOutputTokens  atomic.Uint64
+	businessTotalTokens   atomic.Uint64
+	businessCachedTokens  atomic.Uint64
+	businessReasoning     atomic.Uint64
+	businessRateRejected  atomic.Uint64
+	businessBillingErrors atomic.Uint64
 }
 
 // appMetrics 保存 App、耳机或浏览器这一侧的链路计数。
@@ -64,13 +106,14 @@ type appMetrics struct {
 
 // goMetrics 保存 Go 网关本地压力指标，这些指标不直接归属于 App 或 OpenAI。
 type goMetrics struct {
-	CapacityRejected     uint64 `json:"capacity_rejected"`
-	APISendQueueTimeouts uint64 `json:"api_send_queue_timeouts"`
-	SendQueueTimeouts    uint64 `json:"send_queue_timeouts"`
-	LastSendQueueLen     int    `json:"last_send_queue_len"`
-	LastSendQueueCap     int    `json:"last_send_queue_cap"`
-	LastAPISendQueueLen  int    `json:"last_api_send_queue_len"`
-	LastAPISendQueueCap  int    `json:"last_api_send_queue_cap"`
+	CapacityRejected              uint64 `json:"capacity_rejected"`
+	APISendQueueTimeouts          uint64 `json:"api_send_queue_timeouts"`
+	SendQueueTimeouts             uint64 `json:"send_queue_timeouts"`
+	CriticalAppEventQueueTimeouts uint64 `json:"critical_app_event_queue_timeouts"`
+	LastSendQueueLen              int    `json:"last_send_queue_len"`
+	LastSendQueueCap              int    `json:"last_send_queue_cap"`
+	LastAPISendQueueLen           int    `json:"last_api_send_queue_len"`
+	LastAPISendQueueCap           int    `json:"last_api_send_queue_cap"`
 }
 
 // openAIMetrics 保存 OpenAI Realtime 上游连接、事件、流式输出和响应计数。
@@ -78,6 +121,8 @@ type openAIMetrics struct {
 	ConnectAttempts       uint64            `json:"connect_attempts"`
 	ConnectSuccess        uint64            `json:"connect_success"`
 	ConnectFailures       uint64            `json:"connect_failures"`
+	PingSent              uint64            `json:"ping_sent"`
+	PingFailures          uint64            `json:"ping_failures"`
 	ReconnectRequests     uint64            `json:"reconnect_requests"`
 	ReconnectSuccess      uint64            `json:"reconnect_success"`
 	ReconnectFailures     uint64            `json:"reconnect_failures"`
@@ -114,6 +159,8 @@ type businessMetrics struct {
 	InputTokens       uint64            `json:"input_tokens"`
 	OutputTokens      uint64            `json:"output_tokens"`
 	TotalTokens       uint64            `json:"total_tokens"`
+	CachedTokens      uint64            `json:"cached_tokens"`
+	ReasoningTokens   uint64            `json:"reasoning_tokens"`
 	InputAudioMs      uint64            `json:"input_audio_ms"`
 	OutputAudioMs     uint64            `json:"output_audio_ms"`
 	SessionDurationMs uint64            `json:"session_duration_ms"`
@@ -138,9 +185,11 @@ type sessionMetrics struct {
 	SessionID         string
 	RequestID         string
 	UserID            string
+	UserName          string
 	DeviceID          string
 	Model             string
 	RemoteAddr        string
+	IPLocation        map[string]string
 	UserAgent         string
 	StartedAt         time.Time
 	EndedAt           time.Time
@@ -151,6 +200,8 @@ type sessionMetrics struct {
 	AppBytesOut       uint64
 	AppPingSent       uint64
 	AppPongReceived   uint64
+	OpenAIPingSent    uint64
+	OpenAIPingFailed  uint64
 	LastAppPingAt     time.Time
 	LastPongLatencyMs float64
 	AppDisconnects    uint64
@@ -166,6 +217,8 @@ type sessionMetrics struct {
 	OutputAudioMs     uint64
 	InputTokens       uint64
 	OutputTokens      uint64
+	CachedTokens      uint64
+	ReasoningTokens   uint64
 	EventCounts       map[string]uint64
 	Events            []eventRecord
 	Responses         map[string]*responseMetrics
@@ -184,19 +237,31 @@ type eventRecord struct {
 
 // responseMetrics 保存单个 OpenAI 响应生命周期摘要。
 type responseMetrics struct {
-	ResponseID   string
-	Status       string
-	CreatedAt    time.Time
-	FirstDeltaAt time.Time
-	DoneAt       time.Time
-	Text         string
-	Transcript   string
-	AudioBytes   uint64
-	AudioPackets uint64
-	InputTokens  uint64
-	OutputTokens uint64
-	FirstDeltaMs float64
-	DurationMs   float64
+	ResponseID      string
+	Status          string
+	CreatedAt       time.Time
+	FirstDeltaAt    time.Time
+	DoneAt          time.Time
+	Text            string
+	Transcript      string
+	AudioBytes      uint64
+	AudioPackets    uint64
+	InputTokens     uint64
+	OutputTokens    uint64
+	CachedTokens    uint64
+	ReasoningTokens uint64
+	FirstDeltaMs    float64
+	DurationMs      float64
+}
+
+// ResponseTokenUsage 是一次 OpenAI response.done 的实时 token 明细。
+// 它只服务于进程内监控快照；Redis 持久化仍由 billing.TokenUsageDetail 负责。
+type ResponseTokenUsage struct {
+	InputTokens     int
+	OutputTokens    int
+	TotalTokens     int
+	CachedTokens    int
+	ReasoningTokens int
 }
 
 // global 是当前 Go 进程使用的唯一指标收集器。
@@ -226,7 +291,13 @@ var global = &collector{
 
 // SessionStarted 记录 App WebSocket 生命周期的第一个事件。
 // session.Start 在 handler 接受 App 连接后、OpenAI Provider 启动四协程流水线前调用它。
-func SessionStarted(sessionID, requestID, userID, deviceID, model, remoteAddr, userAgent string) {
+func SessionStarted(sessionID, requestID, userID, userName, deviceID, model, remoteAddr, userAgent string) {
+	SessionStartedWithLocation(sessionID, requestID, userID, userName, deviceID, model, remoteAddr, userAgent, nil)
+}
+
+// SessionStartedWithLocation 记录会话开始，并允许 handler 传入代理/CDN 解析出的所在地。
+// location 只接受展示字段，不参与鉴权；缺失时会回退到本地 IP 类型分类。
+func SessionStartedWithLocation(sessionID, requestID, userID, userName, deviceID, model, remoteAddr, userAgent string, location map[string]string) {
 	if sessionID == "" {
 		return
 	}
@@ -238,9 +309,11 @@ func SessionStarted(sessionID, requestID, userID, deviceID, model, remoteAddr, u
 		SessionID:       sessionID,
 		RequestID:       requestID,
 		UserID:          userID,
+		UserName:        userName,
 		DeviceID:        deviceID,
 		Model:           model,
 		RemoteAddr:      remoteAddr,
+		IPLocation:      normalizeIPLocation(location),
 		UserAgent:       userAgent,
 		StartedAt:       time.Now(),
 		Active:          true,
@@ -299,9 +372,11 @@ func AppDisconnectReason(sessionID, reason string) {
 
 // CapacityRejected 在活跃会话达到 capacity.max_active_sessions，网关拒绝新 WebSocket 时自增。
 func CapacityRejected() {
-	global.mu.Lock()
-	global.goStats.CapacityRejected++
-	global.mu.Unlock()
+	global.counters.goCapacityRejected.Add(1)
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source: stats.SourceSystem,
+		Kind:   stats.ResourceKindCapacityRejected,
+	})
 }
 
 // AppMessage 记录一条 App 上行消息。
@@ -367,21 +442,25 @@ func AppPongReceived(sessionID string) {
 
 // AppWrite 记录 Go 写回 App、耳机或浏览器的字节数。
 func AppWrite(sessionID string, bytes int) {
+	size := uint64(maxInt(bytes, 0))
+	global.counters.appBytesOut.Add(size)
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.app.BytesOut += uint64(maxInt(bytes, 0))
 	if s := global.sessions[sessionID]; s != nil {
-		s.AppBytesOut += uint64(maxInt(bytes, 0))
+		s.AppBytesOut += size
 	}
 }
 
 // SlowConsumerDrop 记录 App 下行队列长时间满载的情况。
 // 此时 Go 会丢弃一条下行消息，避免阻塞整个会话。
 func SlowConsumerDrop(sessionID string, bytes int) {
+	global.counters.appSlowConsumerDrops.Add(1)
+	global.counters.goSendQueueTimeouts.Add(1)
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.app.SlowConsumerDrops++
-	global.goStats.SendQueueTimeouts++
 	if s := global.sessions[sessionID]; s != nil {
 		s.SlowConsumerDrops++
 		addSessionEventLocked(s, "slow_consumer_drop", "sendChan full", "", bytes, "")
@@ -391,12 +470,15 @@ func SlowConsumerDrop(sessionID string, bytes int) {
 // QueueDepth 记录最近一次 App 下行队列和 OpenAI 上行队列的长度。
 // 它是“最近观测值”指标，不是累计计数器。
 func QueueDepth(sessionID string, sendLen, sendCap, apiLen, apiCap int) {
+	global.counters.lastSendQueueLen.Store(int64(sendLen))
+	global.counters.lastSendQueueCap.Store(int64(sendCap))
+	global.counters.lastAPISendQueueLen.Store(int64(apiLen))
+	global.counters.lastAPISendQueueCap.Store(int64(apiCap))
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.goStats.LastSendQueueLen = sendLen
-	global.goStats.LastSendQueueCap = sendCap
-	global.goStats.LastAPISendQueueLen = apiLen
-	global.goStats.LastAPISendQueueCap = apiCap
 	if s := global.sessions[sessionID]; s != nil {
 		s.LastSendQueueLen = sendLen
 		s.LastSendQueueCap = sendCap
@@ -407,10 +489,35 @@ func QueueDepth(sessionID string, sendLen, sendCap, apiLen, apiCap int) {
 
 // APISendQueueTimeout 记录 App 消息在 send_queue_timeout_ms 内无法进入 OpenAI 上行队列的情况。
 func APISendQueueTimeout(sessionID, eventType, reason string) {
+	global.counters.goAPISendTimeouts.Add(1)
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source: stats.SourceRealtime,
+		Kind:   stats.ResourceKindError,
+		Status: "failed",
+		Error:  strings.TrimSpace(eventType + " " + reason),
+	})
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.goStats.APISendQueueTimeouts++
 	recordErrorLocked(sessionID, "api_send_queue_timeout", eventType+" "+reason, "")
+}
+
+// CriticalAppEventQueueTimeout 记录必须送达 App 的关键事件在下行队列中超时。
+// 关键事件包括错误、重连要求、响应结束和工具执行结果；这些事件丢失会让客户端状态机失真。
+func CriticalAppEventQueueTimeout(sessionID, eventType string, bytes int) {
+	global.counters.goCriticalTimeouts.Add(1)
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source: stats.SourceRealtime,
+		Kind:   stats.ResourceKindError,
+		Status: "failed",
+		Error:  strings.TrimSpace(eventType),
+	})
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	if s := global.sessions[sessionID]; s != nil {
+		incMap(s.EventCounts, "app_queue_timeout:"+eventType)
+		addSessionEventLocked(s, "critical_app_event_queue_timeout", eventType, "", bytes, "")
+	}
+	recordErrorLocked(sessionID, "critical_app_event_queue_timeout", eventType, "")
 }
 
 // OpenAIConnectAttempt 记录每一次拨号连接 OpenAI Realtime 的尝试。
@@ -439,11 +546,39 @@ func OpenAIConnectResult(sessionID string, err error) {
 	}
 }
 
-// OpenAIClientEvent 记录一条从 Go 写往 OpenAI 的事件。
-func OpenAIClientEvent(sessionID, eventType, reason string, bytes int) {
+// OpenAIPingSent 记录 Go 主动向 OpenAI 上游发送的 WebSocket Ping。
+// 它用于区分“上游没有任何服务端事件”与“本地没有主动探活”两种情况。
+func OpenAIPingSent(sessionID string) {
+	global.counters.openAIPingSent.Add(1)
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.openai.ClientEventsTotal++
+	if s := global.sessions[sessionID]; s != nil {
+		s.OpenAIPingSent++
+		addSessionEventLocked(s, "openai_ping_sent", "Go -> OpenAI WS Ping", "", 0, "")
+	}
+}
+
+// OpenAIPingFailed 记录主动探活 OpenAI 上游失败。
+// 失败会进入全局错误时间线，便于诊断页和日志把它与重连、读超时关联起来。
+func OpenAIPingFailed(sessionID string, err error) {
+	global.counters.openAIPingFailures.Add(1)
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	if s := global.sessions[sessionID]; s != nil {
+		s.OpenAIPingFailed++
+		addSessionEventLocked(s, "openai_ping_failed", errorString(err), "", 0, "")
+	}
+	recordErrorLocked(sessionID, "openai_ping_failed", errorString(err), "")
+}
+
+// OpenAIClientEvent 记录一条从 Go 写往 OpenAI 的事件。
+func OpenAIClientEvent(sessionID, eventType, reason string, bytes int) {
+	global.counters.openAIClientEvents.Add(1)
+	global.mu.Lock()
+	defer global.mu.Unlock()
 	if eventType == "" {
 		eventType = "unknown"
 	}
@@ -464,9 +599,9 @@ func OpenAIWriteError(sessionID, eventType, reason string, err error) {
 
 // OpenAIServerEvent 记录一条从 OpenAI 读到、并准备转发或转换给 App 的事件。
 func OpenAIServerEvent(sessionID, eventType, responseID string, bytes int) {
+	global.counters.openAIServerEvents.Add(1)
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.openai.ServerEventsTotal++
 	if eventType == "" {
 		eventType = "unknown"
 	}
@@ -480,9 +615,12 @@ func OpenAIServerEvent(sessionID, eventType, responseID string, bytes int) {
 
 // OpenAIResponseCreated 开始记录一次响应生命周期。
 func OpenAIResponseCreated(sessionID, responseID string) {
+	global.counters.openAIResponseCreated.Add(1)
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.openai.ResponseCreated++
 	if s := global.sessions[sessionID]; s != nil {
 		r := ensureResponseLocked(s, responseID)
 		r.CreatedAt = time.Now()
@@ -493,9 +631,12 @@ func OpenAIResponseCreated(sessionID, responseID string) {
 
 // OpenAITextDelta 记录流式助手文本，并为最终诊断快照保留有上限的响应文本。
 func OpenAITextDelta(sessionID, responseID, delta string) {
+	global.counters.openAITextChars.Add(uint64(len([]rune(delta))))
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.openai.TextDeltaChars += uint64(len([]rune(delta)))
 	if s := global.sessions[sessionID]; s != nil {
 		r := ensureResponseLocked(s, responseID)
 		markFirstDeltaLocked(r)
@@ -505,9 +646,12 @@ func OpenAITextDelta(sessionID, responseID, delta string) {
 
 // OpenAITranscriptDelta 记录 OpenAI 返回的流式转写文本。
 func OpenAITranscriptDelta(sessionID, responseID, delta string) {
+	global.counters.openAITranscriptChars.Add(uint64(len([]rune(delta))))
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.openai.TranscriptDeltaChars += uint64(len([]rune(delta)))
 	if s := global.sessions[sessionID]; s != nil {
 		r := ensureResponseLocked(s, responseID)
 		markFirstDeltaLocked(r)
@@ -518,27 +662,34 @@ func OpenAITranscriptDelta(sessionID, responseID, delta string) {
 // OpenAIAudioDelta 记录流式 base64 音频 payload。
 // 解码字节数和 PCM 时长只是诊断用估算值。
 func OpenAIAudioDelta(sessionID, responseID string, encodedBytes int) {
+	decoded := estimateBase64DecodedBytes(encodedBytes)
+	outputMs := uint64(estimatePCM16Ms(decoded))
+	global.counters.openAIAudioPackets.Add(1)
+	global.counters.openAIAudioBytes.Add(uint64(decoded))
+	global.counters.businessOutputAudioMs.Add(outputMs)
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	decoded := estimateBase64DecodedBytes(encodedBytes)
-	global.openai.AudioDeltaPackets++
-	global.openai.AudioDeltaBytes += uint64(decoded)
-	global.business.OutputAudioMs += uint64(estimatePCM16Ms(decoded))
 	if s := global.sessions[sessionID]; s != nil {
 		r := ensureResponseLocked(s, responseID)
 		markFirstDeltaLocked(r)
 		r.AudioPackets++
 		r.AudioBytes += uint64(decoded)
-		s.OutputAudioMs += uint64(estimatePCM16Ms(decoded))
+		s.OutputAudioMs += outputMs
 	}
 }
 
 // InputAudio 记录 App 发送给 OpenAI 的 base64 音频。
 func InputAudio(sessionID string, encodedBytes int) {
+	ms := uint64(estimatePCM16Ms(estimateBase64DecodedBytes(encodedBytes)))
+	global.counters.businessInputAudioMs.Add(ms)
+	if sessionID == "" {
+		return
+	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	ms := uint64(estimatePCM16Ms(estimateBase64DecodedBytes(encodedBytes)))
-	global.business.InputAudioMs += ms
 	if s := global.sessions[sessionID]; s != nil {
 		s.InputAudioMs += ms
 	}
@@ -547,21 +698,40 @@ func InputAudio(sessionID string, encodedBytes int) {
 // OpenAIResponseDone 收口一次响应生命周期。
 // 它会更新响应状态分布、token 用量、首包延迟和完整响应耗时。
 func OpenAIResponseDone(sessionID, responseID, status string, inputTokens, outputTokens int) {
-	global.mu.Lock()
-	defer global.mu.Unlock()
-	global.openai.ResponseDone++
+	OpenAIResponseDoneUsage(sessionID, responseID, status, ResponseTokenUsage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+	})
+}
+
+// OpenAIResponseDoneUsage 收口一次响应生命周期，并记录 response.done 返回的完整 token 明细。
+func OpenAIResponseDoneUsage(sessionID, responseID, status string, usage ResponseTokenUsage) {
+	global.counters.openAIResponseDone.Add(1)
 	switch status {
 	case "completed":
-		global.openai.ResponseCompleted++
+		global.counters.openAIResponseOK.Add(1)
 	case "cancelled":
-		global.openai.ResponseCancelled++
+		global.counters.openAIResponseCancel.Add(1)
 	case "failed", "incomplete":
-		global.openai.ResponseFailed++
+		global.counters.openAIResponseFailed.Add(1)
 	}
-	global.business.InputTokens += uint64(maxInt(inputTokens, 0))
-	global.business.OutputTokens += uint64(maxInt(outputTokens, 0))
-	totalTokens := uint64(maxInt(inputTokens+outputTokens, 0))
-	global.business.TotalTokens += totalTokens
+	if usage.TotalTokens <= 0 {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+	input := uint64(maxInt(usage.InputTokens, 0))
+	output := uint64(maxInt(usage.OutputTokens, 0))
+	totalTokens := uint64(maxInt(usage.TotalTokens, 0))
+	cached := uint64(maxInt(usage.CachedTokens, 0))
+	reasoning := uint64(maxInt(usage.ReasoningTokens, 0))
+	global.counters.businessInputTokens.Add(input)
+	global.counters.businessOutputTokens.Add(output)
+	global.counters.businessTotalTokens.Add(totalTokens)
+	global.counters.businessCachedTokens.Add(cached)
+	global.counters.businessReasoning.Add(reasoning)
+
+	global.mu.Lock()
+	defer global.mu.Unlock()
 	incMapBy(global.business.TokensByDay, time.Now().Format("2006-01-02"), totalTokens)
 
 	if s := global.sessions[sessionID]; s != nil {
@@ -569,10 +739,14 @@ func OpenAIResponseDone(sessionID, responseID, status string, inputTokens, outpu
 		now := time.Now()
 		r.DoneAt = now
 		r.Status = status
-		r.InputTokens += uint64(maxInt(inputTokens, 0))
-		r.OutputTokens += uint64(maxInt(outputTokens, 0))
-		s.InputTokens += uint64(maxInt(inputTokens, 0))
-		s.OutputTokens += uint64(maxInt(outputTokens, 0))
+		r.InputTokens += input
+		r.OutputTokens += output
+		r.CachedTokens += cached
+		r.ReasoningTokens += reasoning
+		s.InputTokens += input
+		s.OutputTokens += output
+		s.CachedTokens += cached
+		s.ReasoningTokens += reasoning
 		incMapBy(global.business.TokensByUser, s.UserID, totalTokens)
 		incMapBy(global.business.TokensByModel, s.Model, totalTokens)
 		if !r.CreatedAt.IsZero() {
@@ -589,6 +763,12 @@ func OpenAIResponseDone(sessionID, responseID, status string, inputTokens, outpu
 
 // OpenAIError 记录 OpenAI 上游返回的错误事件。
 func OpenAIError(sessionID, code, message string) {
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source: stats.SourceRealtime,
+		Kind:   stats.ResourceKindError,
+		Status: "failed",
+		Error:  strings.TrimSpace(code + " " + message),
+	})
 	global.mu.Lock()
 	defer global.mu.Unlock()
 	recordErrorLocked(sessionID, "openai_error", message, code)
@@ -638,18 +818,42 @@ func SessionRestore(sessionID string, historyEvents int, err error) {
 
 // RateLimitRejected 记录被本地或 Redis 限流拦截的请求。
 func RateLimitRejected(userID, model, path, reason string) {
+	global.counters.businessRateRejected.Add(1)
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source: sourceFromPath(path),
+		Kind:   stats.ResourceKindRateLimitRejected,
+		Model:  model,
+		UserID: userID,
+		Status: "rejected",
+	})
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.business.RateLimitRejected++
 	recordErrorLocked("", "rate_limit_rejected", strings.Join([]string{userID, model, path, reason}, " "), "")
 }
 
 // BillingError 记录 response.done 返回 usage 后，token 或计费写入失败的情况。
 func BillingError(sessionID string, err error) {
+	global.counters.businessBillingErrors.Add(1)
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source: stats.SourceRealtime,
+		Kind:   stats.ResourceKindError,
+		Status: "failed",
+		Error:  errorString(err),
+	})
 	global.mu.Lock()
 	defer global.mu.Unlock()
-	global.business.BillingErrors++
 	recordErrorLocked(sessionID, "billing_error", errorString(err), "")
+}
+
+func sourceFromPath(path string) string {
+	path = strings.TrimSpace(path)
+	if strings.Contains(path, "/ws/realtime/") {
+		return stats.SourceRealtime
+	}
+	if strings.Contains(path, "/responses") {
+		return stats.SourceResponses
+	}
+	return stats.SourceSystem
 }
 
 // Snapshot 返回可直接转成 JSON 的安全快照，供 /api/debug/status 使用。
@@ -659,10 +863,12 @@ func Snapshot() map[string]any {
 	defer global.mu.Unlock()
 
 	app := global.app
+	applyAppHotCounters(&app)
 	app.MessageTypes = cloneMap(global.app.MessageTypes)
 	app.DisconnectReasons = cloneMap(global.app.DisconnectReasons)
 
 	openai := global.openai
+	applyOpenAIHotCounters(&openai)
 	openai.ClientEventTypes = cloneMap(global.openai.ClientEventTypes)
 	openai.ServerEventTypes = cloneMap(global.openai.ServerEventTypes)
 	openai.ReconnectReasons = cloneMap(global.openai.ReconnectReasons)
@@ -673,9 +879,13 @@ func Snapshot() map[string]any {
 	errors.Recent = append([]eventRecord(nil), global.errors.Recent...)
 
 	business := global.business
+	applyBusinessHotCounters(&business)
 	business.TokensByUser = cloneMap(global.business.TokensByUser)
 	business.TokensByModel = cloneMap(global.business.TokensByModel)
 	business.TokensByDay = cloneMap(global.business.TokensByDay)
+
+	goStats := global.goStats
+	applyGoHotCounters(&goStats)
 
 	sessions := make([]map[string]any, 0, len(global.sessions))
 	for _, s := range global.sessions {
@@ -692,7 +902,7 @@ func Snapshot() map[string]any {
 		"started_at":       global.started.Format(time.RFC3339),
 		"uptime_seconds":   int64(time.Since(global.started).Seconds()),
 		"app":              app,
-		"go":               global.goStats,
+		"go":               goStats,
 		"openai":           openai,
 		"errors":           errors,
 		"business":         business,
@@ -709,18 +919,20 @@ func snapshotSessionLocked(s *sessionMetrics) map[string]any {
 		id := s.RecentResponses[i]
 		if r := s.Responses[id]; r != nil {
 			responses = append(responses, map[string]any{
-				"response_id":    r.ResponseID,
-				"status":         r.Status,
-				"created_at":     timeString(r.CreatedAt),
-				"done_at":        timeString(r.DoneAt),
-				"first_delta_ms": r.FirstDeltaMs,
-				"duration_ms":    r.DurationMs,
-				"text":           truncateString(r.Text, maxSnapshotResponseChars),
-				"transcript":     truncateString(r.Transcript, maxSnapshotResponseChars),
-				"audio_bytes":    r.AudioBytes,
-				"audio_packets":  r.AudioPackets,
-				"input_tokens":   r.InputTokens,
-				"output_tokens":  r.OutputTokens,
+				"response_id":      r.ResponseID,
+				"status":           r.Status,
+				"created_at":       timeString(r.CreatedAt),
+				"done_at":          timeString(r.DoneAt),
+				"first_delta_ms":   r.FirstDeltaMs,
+				"duration_ms":      r.DurationMs,
+				"text":             truncateString(r.Text, maxSnapshotResponseChars),
+				"transcript":       truncateString(r.Transcript, maxSnapshotResponseChars),
+				"audio_bytes":      r.AudioBytes,
+				"audio_packets":    r.AudioPackets,
+				"input_tokens":     r.InputTokens,
+				"output_tokens":    r.OutputTokens,
+				"cached_tokens":    r.CachedTokens,
+				"reasoning_tokens": r.ReasoningTokens,
 			})
 		}
 	}
@@ -728,9 +940,12 @@ func snapshotSessionLocked(s *sessionMetrics) map[string]any {
 		"session_id":           s.SessionID,
 		"request_id":           s.RequestID,
 		"user_id":              s.UserID,
+		"user_name":            s.UserName,
 		"device_id":            s.DeviceID,
 		"model":                s.Model,
 		"remote_addr":          s.RemoteAddr,
+		"real_ip":              realIPFromRemoteAddr(s.RemoteAddr),
+		"ip_location":          sessionIPLocation(s),
 		"user_agent":           s.UserAgent,
 		"started_at":           s.StartedAt.Format(time.RFC3339),
 		"ended_at":             timeString(s.EndedAt),
@@ -742,6 +957,8 @@ func snapshotSessionLocked(s *sessionMetrics) map[string]any {
 		"app_bytes_out":        s.AppBytesOut,
 		"app_ping_sent":        s.AppPingSent,
 		"app_pong_received":    s.AppPongReceived,
+		"openai_ping_sent":     s.OpenAIPingSent,
+		"openai_ping_failed":   s.OpenAIPingFailed,
 		"last_pong_latency_ms": s.LastPongLatencyMs,
 		"openai_events_up":     s.OpenAIEventsUp,
 		"openai_events_down":   s.OpenAIEventsDown,
@@ -756,10 +973,56 @@ func snapshotSessionLocked(s *sessionMetrics) map[string]any {
 		"output_audio_ms":      s.OutputAudioMs,
 		"input_tokens":         s.InputTokens,
 		"output_tokens":        s.OutputTokens,
+		"cached_tokens":        s.CachedTokens,
+		"reasoning_tokens":     s.ReasoningTokens,
 		"event_counts":         cloneMap(s.EventCounts),
 		"events":               append([]eventRecord(nil), s.Events...),
 		"responses":            responses,
 	}
+}
+
+func applyAppHotCounters(app *appMetrics) {
+	app.BytesOut = global.counters.appBytesOut.Load()
+	app.SlowConsumerDrops = global.counters.appSlowConsumerDrops.Load()
+}
+
+func applyGoHotCounters(goStats *goMetrics) {
+	goStats.CapacityRejected = global.counters.goCapacityRejected.Load()
+	goStats.APISendQueueTimeouts = global.counters.goAPISendTimeouts.Load()
+	goStats.SendQueueTimeouts = global.counters.goSendQueueTimeouts.Load()
+	goStats.CriticalAppEventQueueTimeouts = global.counters.goCriticalTimeouts.Load()
+	goStats.LastSendQueueLen = int(global.counters.lastSendQueueLen.Load())
+	goStats.LastSendQueueCap = int(global.counters.lastSendQueueCap.Load())
+	goStats.LastAPISendQueueLen = int(global.counters.lastAPISendQueueLen.Load())
+	goStats.LastAPISendQueueCap = int(global.counters.lastAPISendQueueCap.Load())
+}
+
+func applyOpenAIHotCounters(openai *openAIMetrics) {
+	openai.PingSent = global.counters.openAIPingSent.Load()
+	openai.PingFailures = global.counters.openAIPingFailures.Load()
+	openai.ClientEventsTotal = global.counters.openAIClientEvents.Load()
+	openai.ServerEventsTotal = global.counters.openAIServerEvents.Load()
+	openai.ResponseCreated = global.counters.openAIResponseCreated.Load()
+	openai.ResponseDone = global.counters.openAIResponseDone.Load()
+	openai.ResponseCompleted = global.counters.openAIResponseOK.Load()
+	openai.ResponseCancelled = global.counters.openAIResponseCancel.Load()
+	openai.ResponseFailed = global.counters.openAIResponseFailed.Load()
+	openai.TextDeltaChars = global.counters.openAITextChars.Load()
+	openai.TranscriptDeltaChars = global.counters.openAITranscriptChars.Load()
+	openai.AudioDeltaBytes = global.counters.openAIAudioBytes.Load()
+	openai.AudioDeltaPackets = global.counters.openAIAudioPackets.Load()
+}
+
+func applyBusinessHotCounters(business *businessMetrics) {
+	business.InputAudioMs = global.counters.businessInputAudioMs.Load()
+	business.OutputAudioMs = global.counters.businessOutputAudioMs.Load()
+	business.InputTokens = global.counters.businessInputTokens.Load()
+	business.OutputTokens = global.counters.businessOutputTokens.Load()
+	business.TotalTokens = global.counters.businessTotalTokens.Load()
+	business.CachedTokens = global.counters.businessCachedTokens.Load()
+	business.ReasoningTokens = global.counters.businessReasoning.Load()
+	business.RateLimitRejected = global.counters.businessRateRejected.Load()
+	business.BillingErrors = global.counters.businessBillingErrors.Load()
 }
 
 // addSessionEventLocked 向会话时间线追加一条事件，并只保留最新 maxSessionEvents 条。
@@ -960,6 +1223,104 @@ func timeString(t time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+// realIPFromRemoteAddr 从 Gin ClientIP 或 RemoteAddr 中提取纯 IP。
+// RemoteAddr 可能是 "1.2.3.4:5678"、IPv6 或已经解析好的 IP 字符串。
+func realIPFromRemoteAddr(remoteAddr string) string {
+	value := strings.TrimSpace(remoteAddr)
+	if value == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(value, "[]")
+}
+
+// ipLocationSummary 返回不依赖外部服务的 IP 归属摘要。
+// 当前先稳定区分本机、内网、公网和非法地址；后续可在这里接入 GeoIP 数据库或第三方解析。
+func ipLocationSummary(ipText string) map[string]string {
+	ip := net.ParseIP(strings.TrimSpace(ipText))
+	if ip == nil {
+		return map[string]string{
+			"status":  "unknown",
+			"display": "未知地址",
+			"source":  "local_ip_classifier",
+		}
+	}
+	if ip.IsLoopback() {
+		return map[string]string{
+			"status":  "loopback",
+			"display": "本机地址",
+			"source":  "local_ip_classifier",
+		}
+	}
+	if ip.IsPrivate() {
+		return map[string]string{
+			"status":  "private",
+			"display": "内网地址",
+			"source":  "local_ip_classifier",
+		}
+	}
+	return map[string]string{
+		"status":  "public",
+		"display": "公网地址（未配置 IP 地理库）",
+		"source":  "local_ip_classifier",
+	}
+}
+
+func sessionIPLocation(s *sessionMetrics) map[string]string {
+	if s != nil && len(s.IPLocation) > 0 {
+		return cloneStringMap(s.IPLocation)
+	}
+	if s == nil {
+		return ipLocationSummary("")
+	}
+	return ipLocationSummary(realIPFromRemoteAddr(s.RemoteAddr))
+}
+
+func normalizeIPLocation(location map[string]string) map[string]string {
+	if len(location) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(location)+2)
+	for key, value := range location {
+		key = strings.TrimSpace(strings.ToLower(key))
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	if out["source"] == "" {
+		out["source"] = "request_header"
+	}
+	if out["status"] == "" {
+		out["status"] = "provided"
+	}
+	if out["display"] == "" {
+		parts := make([]string, 0, 3)
+		for _, key := range []string{"country", "region", "city"} {
+			if out[key] != "" {
+				parts = append(parts, out[key])
+			}
+		}
+		if len(parts) > 0 {
+			out["display"] = strings.Join(parts, " / ")
+		}
+	}
+	return out
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 // errorString 安全地把 nil 或非 nil error 转成字符串。

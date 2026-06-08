@@ -1,12 +1,3 @@
-// cmd/server/main.go
-// 服务入口文件：负责加载配置、初始化组件、注册路由及中间件，并处理服务生命周期。
-//
-// 核心逻辑：
-//  1. 加载全局配置（loader.go）
-//  2. 初始化日志、Redis、模型缓存等单例
-//  3. 按需启用 JWT 鉴权、限流、Fallback 降级功能
-//  4. 注册路由，区分公开接口与受保护接口
-//  5. 启动 HTTP Server 并处理系统信号（优雅关闭）
 package main
 
 import (
@@ -25,118 +16,31 @@ import (
 	"TozoAI-Chat-Api/internal/handler"
 	"TozoAI-Chat-Api/internal/logger"
 	"TozoAI-Chat-Api/internal/middleware"
+	"TozoAI-Chat-Api/internal/service/monitor"
 	"TozoAI-Chat-Api/internal/service/redis"
 	"TozoAI-Chat-Api/internal/service/session"
 
-	// ========== 关键：空导入触发 Provider 工厂注册 ==========
-	// 每个模型包的 init() 函数会调用 provider.Register() 注册工厂
-	// 确保 handler.OpenAIRealtimeHandler 能够通过工厂模式创建 Provider 实例
 	_ "TozoAI-Chat-Api/internal/provider/azureai"
 	_ "TozoAI-Chat-Api/internal/provider/openai"
 )
 
 func main() {
-	// 1. 初始化配置加载（全局配置 + 环境变量覆盖）
 	if err := conf.Load(); err != nil {
-		panic(fmt.Sprintf("配置加载失败: %v", err))
+		panic(fmt.Sprintf("config load failed: %v", err))
 	}
 
-	// 2. 环境判断与运行模式设置
 	if conf.Global.Env == "prod" {
 		gin.SetMode(gin.ReleaseMode)
 	} else {
 		gin.SetMode(gin.DebugMode)
 	}
 
-	// 3. 初始化全局共享组件
-	logger.Init()          // 初始化日志系统（zap）
-	redis.Init()           // 初始化 Redis 客户端连接
-	conf.InitModelConfig() // 初始化模型配置缓存
+	logger.Init()
+	redis.Init()
+	conf.InitModelConfig()
 
-	// 4. 初始化 Gin 引擎
-	r := gin.Default()
+	r := buildRouter()
 
-	// 5. 注册路由组
-
-	// 5.1 公开路由（无需 JWT 鉴权，无需限流）
-	public := r.Group("/")
-	{
-		// 健康检查接口
-		public.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{
-				"status":          "ok",
-				"time":            time.Now().Format(time.RFC3339),
-				"active_sessions": session.ActiveCount(),
-			})
-		})
-
-		// 测试接口：生成 JWT Token
-		// 支持 ?userId=xxx 指定用户ID（默认 test_user_001）
-		public.GET("/test/generate-token", func(c *gin.Context) {
-			userID := c.DefaultQuery("userId", "test_user_001")
-			token, err := middleware.GenerateToken(userID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "error": "failed to generate token: " + err.Error()})
-				return
-			}
-			c.JSON(http.StatusOK, gin.H{
-				"code":    200,
-				"token":   token,
-				"user_id": userID,
-				"tips":    "请在请求头中携带：Authorization: Bearer " + token,
-			})
-		})
-
-		// Redis 监控 API：扫描所有 key 并返回类型+值
-		// 仅开发环境可用，生产环境应关闭或加鉴权
-		public.GET("/api/redis/keys", handler.RedisKeysHandler)
-		public.GET("/api/debug/status", handler.DebugStatusHandler)
-		public.GET("/api/openai/responses/status", handler.OpenAIResponsesStatusHandler)
-		public.GET("/api/azure/status", handler.AzureStatusHandler)
-
-		// Web 测试面板：静态文件服务（开发环境可用）
-		// 访问 http://localhost:8080/web/ 打开 WebSocket 测试面板
-		// 访问 http://localhost:8080/web/redis.html 打开 Redis 监控面板
-		public.Static("/web", "./web")
-	}
-
-	// 5.2 受保护路由组（Realtime WS 与 Fallback HTTP）
-	auth := r.Group("/")
-
-	// 5.2.1 按需加载中间件：JWT 鉴权校验
-	if conf.Global.JWT.Enabled {
-		auth.Use(middleware.Auth())
-	}
-
-	// 5.2.2 按需加载中间件：全局限流
-	if conf.Global.RateLimit.Enabled {
-		auth.Use(middleware.RateLimit())
-	}
-
-	{
-		// OpenAI 实时 WebSocket 接口
-		auth.GET("/ws/realtime/openai", handler.OpenAIRealtimeHandler)
-		auth.POST("/api/openai/responses", handler.OpenAIResponsesHandler)
-
-		// Azure OpenAI：Realtime + 普通 HTTP 能力代理。
-		// 这些接口使用同一个 azureai 模型配置，deployment 与 api-version 从 conf/models/azureai.yaml 读取。
-		auth.GET("/ws/realtime/azure", handler.AzureRealtimeHandler)
-		auth.POST("/api/azure/chat/completions", handler.AzureChatCompletionsHandler)
-		auth.POST("/api/azure/completions", handler.AzureCompletionsHandler)
-		auth.POST("/api/azure/images/generations", handler.AzureImageGenerationsHandler)
-		auth.POST("/api/azure/images/edits", handler.AzureImageEditsHandler)
-		auth.POST("/api/azure/audio/speech", handler.AzureAudioSpeechHandler)
-		auth.POST("/api/azure/audio/transcriptions", handler.AzureAudioTranscriptionsHandler)
-		auth.POST("/api/azure/audio/translations", handler.AzureAudioTranslationsHandler)
-		auth.POST("/api/azure/tst", handler.AzureTSTHandler)
-
-		// 只有在全局降级功能开启时，才暴露 HTTP 降级接口
-		if conf.Global.Fallback.Enabled {
-			auth.POST("/v1/chat/completions", handler.OpenAIFallbackHandler)
-		}
-	}
-
-	// 6. 实例化并启动 HTTP 服务器
 	serverLog := logger.GetModelLogger("global")
 	server := &http.Server{
 		Addr:              conf.Global.Server.Addr,
@@ -146,37 +50,169 @@ func main() {
 		MaxHeaderBytes:    1 << 20,
 	}
 
-	serverLog.Info("服务启动中...",
+	serverLog.Info("service starting",
 		zap.String("addr", conf.Global.Server.Addr),
 		zap.String("env", conf.Global.Env),
 		zap.Bool("jwt_enabled", conf.Global.JWT.Enabled),
 		zap.Bool("rate_limit_enabled", conf.Global.RateLimit.Enabled),
 		zap.Bool("fallback_enabled", conf.Global.Fallback.Enabled))
 
-	// 6.1 优雅关闭逻辑（监听系统信号）
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	monitorDone := monitor.StartPeriodicLogger(monitorCtx, time.Now(), 30*time.Second)
+	cleanupInterval, err := time.ParseDuration(conf.Global.Logs.CleanupInterval)
+	if err != nil {
+		serverLog.Fatal("log cleanup interval config invalid", zap.String("interval", conf.Global.Logs.CleanupInterval), zap.Error(err))
+	}
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	cleanupDone := logger.StartCleanupScheduler(cleanupCtx, conf.Global.Logs.RetentionDays, cleanupInterval)
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-quit
-		serverLog.Info("收到终止信号，开始优雅关闭...")
+		serverLog.Info("shutdown signal received")
 
-		// 设置 10 秒关闭超时
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := server.Shutdown(ctx); err != nil {
-			serverLog.Fatal("服务强制关闭失败", zap.Error(err))
+			serverLog.Fatal("service shutdown failed", zap.Error(err))
 		}
 
-		redis.Close()    // 断开 Redis 连接
-		logger.SyncAll() // 刷新日志缓冲区
-		serverLog.Info("服务优雅关闭完成，退出程序")
+		monitorCancel()
+		select {
+		case <-monitorDone:
+		case <-time.After(2 * time.Second):
+			serverLog.Warn("periodic monitor logger did not stop before shutdown timeout")
+		}
+
+		cleanupCancel()
+		select {
+		case <-cleanupDone:
+		case <-time.After(2 * time.Second):
+			serverLog.Warn("log cleanup scheduler did not stop before shutdown timeout")
+		}
+
+		redis.Close()
+		serverLog.Info("service shutdown complete")
+		logger.SyncAll()
 		os.Exit(0)
 	}()
 
-	// 6.2 监听并服务
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		serverLog.Fatal("服务启动失败", zap.Error(err))
+		serverLog.Fatal("service start failed", zap.Error(err))
 	}
+}
+
+func buildRouter() *gin.Engine {
+	r := gin.Default()
+	applyTrustedProxies(r)
+	registerRoutes(r)
+	return r
+}
+
+func applyTrustedProxies(r *gin.Engine) {
+	if r == nil {
+		return
+	}
+	if conf.Global == nil || len(conf.Global.Security.TrustedProxies) == 0 {
+		_ = r.SetTrustedProxies(nil)
+		return
+	}
+	if err := r.SetTrustedProxies(conf.Global.Security.TrustedProxies); err != nil {
+		panic(fmt.Sprintf("trusted proxies config invalid: %v", err))
+	}
+}
+
+func registerRoutes(r *gin.Engine) {
+	public := r.Group("/")
+	registerPublicRoutes(public)
+
+	auth := r.Group("/")
+	if conf.Global != nil && conf.Global.JWT.Enabled {
+		auth.Use(middleware.Auth())
+	}
+	if conf.Global != nil && conf.Global.RateLimit.Enabled {
+		auth.Use(middleware.RateLimit())
+	}
+	registerProtectedRoutes(auth)
+}
+
+func registerPublicRoutes(public *gin.RouterGroup) {
+	public.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":          "ok",
+			"time":            time.Now().Format(time.RFC3339),
+			"active_sessions": session.ActiveCount(),
+		})
+	})
+
+	if conf.Global != nil && conf.Global.Security.PublicTokenEnabled {
+		public.GET("/test/generate-token", func(c *gin.Context) {
+			userID := c.DefaultQuery("userId", "test_user_001")
+			userName := c.DefaultQuery("userName", "")
+			token, err := middleware.GenerateTokenWithUserName(userID, userName)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "error": "failed to generate token: " + err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"code":      200,
+				"token":     token,
+				"user_id":   userID,
+				"user_name": userName,
+				"tips":      "Authorization: Bearer " + token,
+			})
+		})
+	}
+
+	if conf.Global != nil && conf.Global.Security.PublicDebugEnabled {
+		registerDebugRoutes(public)
+	}
+
+	webStatic := handler.WebStaticHandler("./web")
+	public.GET("/web", webStatic)
+	public.HEAD("/web", webStatic)
+	public.GET("/web/*filepath", webStatic)
+	public.HEAD("/web/*filepath", webStatic)
+}
+
+func registerProtectedRoutes(auth *gin.RouterGroup) {
+	auth.GET("/ws/realtime/openai", handler.OpenAIRealtimeHandler)
+	auth.POST("/api/openai/responses", handler.OpenAIResponsesHandler)
+	auth.GET("/api/workspace/projects", handler.WorkspaceProjectsHandler)
+	auth.GET("/api/workspace/list", handler.WorkspaceListHandler)
+	auth.GET("/api/workspace/read", handler.WorkspaceReadHandler)
+	auth.POST("/api/workspace/write", handler.WorkspaceWriteHandler)
+	auth.POST("/api/workspace/write/confirm", handler.WorkspaceWriteConfirmHandler)
+	auth.POST("/api/workspace/write/reject", handler.WorkspaceWriteRejectHandler)
+
+	auth.GET("/ws/realtime/azure", handler.AzureRealtimeHandler)
+	auth.POST("/api/azure/chat/completions", handler.AzureChatCompletionsHandler)
+	auth.POST("/api/azure/completions", handler.AzureCompletionsHandler)
+	auth.POST("/api/azure/images/generations", handler.AzureImageGenerationsHandler)
+	auth.POST("/api/azure/images/edits", handler.AzureImageEditsHandler)
+	auth.POST("/api/azure/audio/speech", handler.AzureAudioSpeechHandler)
+	auth.POST("/api/azure/audio/transcriptions", handler.AzureAudioTranscriptionsHandler)
+	auth.POST("/api/azure/audio/translations", handler.AzureAudioTranslationsHandler)
+	auth.POST("/api/azure/tst", handler.AzureTSTHandler)
+
+	if conf.Global == nil || !conf.Global.Security.PublicDebugEnabled {
+		registerDebugRoutes(auth)
+	}
+
+	if conf.Global != nil && conf.Global.Fallback.Enabled {
+		auth.POST("/v1/chat/completions", handler.OpenAIFallbackHandler)
+	}
+}
+
+func registerDebugRoutes(group *gin.RouterGroup) {
+	group.GET("/api/redis/keys", handler.RedisKeysHandler)
+	group.GET("/api/debug/status", handler.DebugStatusHandler)
+	group.GET("/api/openai/responses/status", handler.OpenAIResponsesStatusHandler)
+	group.GET("/api/web/models", handler.WebModelsHandler)
+	group.GET("/api/web/metrics", handler.WebMetricsHandler)
+	group.GET("/api/stats/resources", handler.StatsResourcesHandler)
+	group.GET("/api/azure/status", handler.AzureStatusHandler)
 }

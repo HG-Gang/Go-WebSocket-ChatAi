@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TozoAI WebSocket 测试面板</title>
     <link rel="stylesheet" href="style.css?v=20260525-svc-config">
+    <script src="/web/theme.js?v=20260607-theme" defer></script>
 </head>
 <body>
     <div class="container">
@@ -14,6 +15,7 @@
             <p class="subtitle">双端心跳检测 + 断线重连 功能验证工具</p>
             <p style="margin-top:8px;font-size:13px;">
                 <a href="/web/audio.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">语音对话测试</a> |
+                <a href="/web/chat.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">聊天看板</a> |
                 <a href="/web/redis.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">Redis 监控</a> |
                 <a href="/web/diagnostics.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">诊断看板</a> |
                 <a href="/web/responses.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">Responses 测试</a> |
@@ -130,7 +132,7 @@
                 </div>
             </div>
             <div class="form-group" style="margin-top:8px;">
-                <label>系统提示 instructions（前 200 字预览）</label>
+                <label>系统提示 instructions（安全摘要）</label>
                 <pre id="svc-cfg-instructions" style="background:rgba(0,0,0,.18);padding:8px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto;">-</pre>
             </div>
         </section>
@@ -156,7 +158,20 @@
                     <label for="token-api">Token 接口地址</label>
                     <input type="text" id="token-api" value="http://127.0.0.1:8096/test/generate-token" placeholder="http://host:port/test/generate-token">
                 </div>
+                <div class="form-group">
+                    <label for="upstream-ws-url">上游 Realtime URL（第三方中转）</label>
+                    <input type="text" id="upstream-ws-url" placeholder="https://relay.example.com/v1 或 wss://relay.example.com/v1/realtime">
+                </div>
+                <div class="form-group">
+                    <label for="upstream-model">上游模型</label>
+                    <input type="text" id="upstream-model" value="gpt-realtime" placeholder="gpt-realtime">
+                </div>
+                <div class="form-group">
+                    <label for="upstream-api-key">上游 API Key</label>
+                    <input type="password" id="upstream-api-key" placeholder="sk-...">
+                </div>
             </div>
+            <p class="hint">中转 URL 和 Key 会作为本次本地 WebSocket 连接参数发送到 Go 服务，由 Go 服务连接第三方上游；浏览器不会直接连接第三方上游。支持填写 https/http 地址，后端会自动转换为 wss/ws；但第三方必须支持 Realtime WebSocket 协议，普通 Chat/Completions HTTP 接口不能直接变成长连接。API Key 不会自动保存，且仅限开发调试；生产环境默认禁用 query key，请改用服务端配置。</p>
             <div class="btn-group">
                 <button class="btn btn-primary" id="btn-connect">连接</button>
                 <button class="btn btn-danger" id="btn-disconnect" disabled>断开</button>

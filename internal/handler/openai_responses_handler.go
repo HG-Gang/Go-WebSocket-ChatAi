@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -27,16 +28,16 @@ func OpenAIResponsesStatusHandler(c *gin.Context) {
 // OpenAIResponsesHandler 接入 OpenAI Responses API。
 // 请求体尽量贴近官方 /v1/responses JSON，网关只补齐 model、instructions、store 等默认值。
 func OpenAIResponsesHandler(c *gin.Context) {
-	log := logger.GetModelLogger("openairesponses")
-	cfg := conf.GetModel("openairesponses")
-	if cfg == nil || !cfg.Enabled {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": "openairesponses model is not enabled"})
-		return
-	}
-
 	var payload map[string]any
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": "invalid JSON: " + err.Error()})
+		return
+	}
+	modelConfig := responseModelConfigName(payload)
+	log := logger.GetModelLogger(modelConfig)
+	cfg := conf.GetModel(modelConfig)
+	if cfg == nil || !cfg.Enabled {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": modelConfig + " model is not enabled"})
 		return
 	}
 	if _, ok := payload["input"]; !ok {
@@ -55,20 +56,25 @@ func OpenAIResponsesHandler(c *gin.Context) {
 		if ctx.Err() == context.DeadlineExceeded {
 			status = http.StatusGatewayTimeout
 		}
+		errorSummary := logger.RedactField("content", err.Error())
+		addResponsesMetric(c, modelConfig, cfg, payload, result, "failed", latency, errorSummary)
 		log.Warn("Responses API 请求失败",
 			zap.Error(err),
+			zap.String("error_summary", errorSummary),
 			zap.Duration("latency", latency),
 			zap.Int("upstream_status", upstreamStatus(result)))
 		c.JSON(status, gin.H{
-			"code":            status,
-			"error":           err.Error(),
-			"latency_ms":      latency.Milliseconds(),
-			"upstream_status": upstreamStatus(result),
-			"upstream_raw":    rawJSON(result),
+			"code":                 status,
+			"error":                "responses upstream request failed",
+			"error_summary":        errorSummary,
+			"latency_ms":           latency.Milliseconds(),
+			"upstream_status":      upstreamStatus(result),
+			"upstream_raw_summary": redactedRawJSON(result),
 		})
 		return
 	}
 
+	addResponsesMetric(c, modelConfig, cfg, payload, result, result.Status, latency, "")
 	log.Info("Responses API 请求完成",
 		zap.String("response_id", result.ID),
 		zap.String("model", result.Model),
@@ -79,6 +85,27 @@ func OpenAIResponsesHandler(c *gin.Context) {
 		"latency_ms": latency.Milliseconds(),
 		"data":       result,
 	})
+}
+
+func responseModelConfigName(payload map[string]any) string {
+	if payload == nil {
+		return "openairesponses"
+	}
+	modelConfig := ""
+	for _, key := range []string{"model_config", "_model_config"} {
+		value, ok := payload[key]
+		delete(payload, key)
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			modelConfig = strings.TrimSpace(text)
+		}
+	}
+	if modelConfig != "" {
+		return modelConfig
+	}
+	return "openairesponses"
 }
 
 func responseTimeout(cfg *conf.ModelConfig) time.Duration {
@@ -101,4 +128,12 @@ func rawJSON(result *openairesponses.Result) json.RawMessage {
 		return nil
 	}
 	return result.Raw
+}
+
+func redactedRawJSON(result *openairesponses.Result) string {
+	raw := rawJSON(result)
+	if len(raw) == 0 {
+		return ""
+	}
+	return logger.RedactField("content", string(raw))
 }

@@ -16,8 +16,19 @@ jwt:
   enabled: true
   secret: ""         # 生产密钥严禁提交至代码库，应通过环境变量注入
 
+security:
+  public_debug_enabled: false
+  public_token_enabled: false
+  allowed_origins: []
+  trusted_proxies: []
+  allow_upstream_query_key: false
+  workspace_write_confirm: true
+  workspace_audit_retention_days: 180
+
 logs:
   root_dir: "./logs"
+  retention_days: 180       # 生产默认保留 180 天按天日志，满足审计追溯窗口
+  cleanup_interval: "24h"   # 每天执行一次日志清理
 
 rate_limit:
   enabled: true       # 生产环境必须开启限流保护

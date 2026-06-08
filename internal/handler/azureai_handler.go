@@ -42,6 +42,7 @@ func AzureRealtimeHandler(c *gin.Context) {
 		return
 	}
 	uid, _ := userID.(string)
+	userName := c.GetString("user_name")
 	requestID := generateRequestID(uid)
 
 	remoteAddr := c.ClientIP()
@@ -53,19 +54,24 @@ func AzureRealtimeHandler(c *gin.Context) {
 	if deviceID == "" {
 		deviceID = c.Query("device_id")
 	}
+	ipLocation := clientIPLocationFromRequest(c)
 	reqLog := log.With(
 		zap.String("request_id", requestID),
 		zap.String("user_id", uid),
+		zap.String("user_name", userName),
 		zap.String("device_id", deviceID),
 		zap.String("remote_addr", remoteAddr),
+		zap.Any("ip_location", ipLocation),
 	)
 	reqLog.Info("收到 Azure Realtime WS 连接请求")
 
 	if !session.TryAcquireCapacity() {
 		metrics.CapacityRejected()
+		activeSessions := session.ActiveCount()
 		reqLog.Warn("实例活跃会话数已达上限，拒绝新 Azure WS 连接",
-			zap.Int64("active_sessions", session.ActiveCount()),
+			zap.Int64("active_sessions", activeSessions),
 			zap.Int64("max_active_sessions", conf.Global.Capacity.MaxActiveSessions))
+		notifyCapacityOverloadAlert(reqLog, "azureai", uid, userName, remoteAddr, ipLocation, activeSessions)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "server overloaded, retry another node"})
 		return
 	}
@@ -93,7 +99,8 @@ func AzureRealtimeHandler(c *gin.Context) {
 	}
 	defer appConn.Close()
 
-	sess := session.NewSession(uid, modelName, requestID, remoteAddr, userAgent, deviceID, appConn, prov)
+	sess := session.NewSession(uid, userName, modelName, requestID, remoteAddr, userAgent, deviceID, appConn, prov)
+	sess.SetClientLocation(ipLocation)
 	defer sess.Close()
 	sess.Start(c.Request.Context())
 
@@ -168,10 +175,11 @@ func handleAzureProxy(c *gin.Context, capability string) {
 			zap.Duration("latency", latency),
 			zap.Error(err))
 		c.JSON(status, gin.H{
-			"code":       status,
-			"error":      err.Error(),
-			"capability": capability,
-			"latency_ms": latency.Milliseconds(),
+			"code":          status,
+			"error":         "azure upstream request failed",
+			"error_summary": logger.RedactField("content", err.Error()),
+			"capability":    capability,
+			"latency_ms":    latency.Milliseconds(),
 		})
 		return
 	}

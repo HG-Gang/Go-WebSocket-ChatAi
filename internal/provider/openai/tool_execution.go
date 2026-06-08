@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"TozoAI-Chat-Api/conf"
+	"TozoAI-Chat-Api/internal/logger"
+	"TozoAI-Chat-Api/internal/service/workspace"
 	protocol "TozoAI-Chat-Api/pkg/protocol/openai"
 	"TozoAI-Chat-Api/pkg/response"
 )
@@ -23,6 +26,7 @@ type realtimeToolResult struct {
 	output           map[string]any
 	appResponse      *response.StandardResponse
 	continueResponse bool
+	textResponse     bool
 	cancelActive     bool
 	cancelReason     string
 	reason           string
@@ -126,7 +130,7 @@ func (c *Client) executeWeatherFunctionTool(ctx context.Context, evt *protocol.R
 			"ok":          false,
 			"code":        "weather_http_error",
 			"status_code": statusCode,
-			"body":        firstNonEmpty(rawBody, fmt.Sprint(data)),
+			"body":        redactedToolBody(firstNonEmpty(rawBody, fmt.Sprint(data))),
 			"args":        args,
 		}
 		return realtimeToolResult{
@@ -225,7 +229,7 @@ func (c *Client) executeKnowledgeFunctionTool(ctx context.Context, evt *protocol
 			"code":        "knowledge_http_error",
 			"status_code": statusCode,
 			"message":     "知识库服务返回非 2xx 状态，模型应提示用户稍后再试。",
-			"body":        firstNonEmpty(rawBody, fmt.Sprint(data)),
+			"body":        redactedToolBody(firstNonEmpty(rawBody, fmt.Sprint(data))),
 		}
 		return realtimeToolResult{
 			output:           output,
@@ -309,7 +313,7 @@ func (c *Client) executeNavigationFunctionTool(ctx context.Context, evt *protoco
 			"ok":          false,
 			"code":        "map_http_error",
 			"status_code": statusCode,
-			"body":        firstNonEmpty(rawBody, fmt.Sprint(data)),
+			"body":        redactedToolBody(firstNonEmpty(rawBody, fmt.Sprint(data))),
 			"args":        args,
 		}
 		return realtimeToolResult{
@@ -335,6 +339,102 @@ func (c *Client) executeNavigationFunctionTool(ctx context.Context, evt *protoco
 		continueResponse: true,
 		reason:           "map_ok",
 	}
+}
+
+func (c *Client) executeWorkspaceFunctionTool(ctx context.Context, evt *protocol.ResponseFunctionCallArgumentsDoneEvent, args map[string]any) realtimeToolResult {
+	projectID := firstNonEmpty(stringFromAny(args["project_id"]), "current")
+	relPath := stringFromAny(args["path"])
+	output := map[string]any{
+		"ok":         false,
+		"tool":       evt.Name,
+		"project_id": projectID,
+		"path":       relPath,
+	}
+
+	if err := ctx.Err(); err != nil {
+		return workspaceToolResult(evt, output, "workspace_context_cancelled", err)
+	}
+
+	switch evt.Name {
+	case "workspace_list_files":
+		entries, err := workspace.List(projectID, relPath)
+		if err != nil {
+			return workspaceToolResult(evt, output, "workspace_list_failed", err)
+		}
+		output["ok"] = true
+		output["entries"] = entries
+		output["count"] = len(entries)
+		return workspaceToolResult(evt, output, "workspace_list_ok", nil)
+
+	case "workspace_read_file":
+		file, err := workspace.Read(projectID, relPath)
+		if err != nil {
+			return workspaceToolResult(evt, output, "workspace_read_failed", err)
+		}
+		output["ok"] = true
+		output["file"] = workspaceFileOutput(file, true)
+		return workspaceToolResult(evt, output, "workspace_read_ok", nil)
+
+	case "workspace_write_file":
+		if workspaceWriteConfirmEnabled() {
+			pending, err := workspace.PreviewWrite(projectID, relPath, stringFromAny(args["content"]), workspace.WriteActor{
+				UserID:    c.userID,
+				Source:    "model_tool",
+				RequestID: c.sessionID,
+			})
+			if err != nil {
+				return workspaceToolResult(evt, output, "workspace_write_failed", err)
+			}
+			output["ok"] = true
+			output["pending_write_id"] = pending.ID
+			output["diff"] = pending.Diff
+			output["diff_hash"] = pending.DiffHash
+			output["status"] = pending.Status
+			return workspaceToolResult(evt, output, "workspace_write_pending", nil)
+		}
+		file, err := workspace.Write(projectID, relPath, stringFromAny(args["content"]))
+		if err != nil {
+			return workspaceToolResult(evt, output, "workspace_write_failed", err)
+		}
+		output["ok"] = true
+		output["file"] = workspaceFileOutput(file, false)
+		return workspaceToolResult(evt, output, "workspace_write_ok", nil)
+
+	default:
+		return workspaceToolResult(evt, output, "workspace_unknown_tool", fmt.Errorf("unknown workspace tool: %s", evt.Name))
+	}
+}
+
+func workspaceWriteConfirmEnabled() bool {
+	return conf.Global != nil && conf.Global.Security.WorkspaceWriteConfirm
+}
+
+func workspaceToolResult(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, output map[string]any, reason string, err error) realtimeToolResult {
+	code := 0
+	if err != nil {
+		code = 400
+		output["ok"] = false
+		output["code"] = reason
+		output["error"] = err.Error()
+	}
+	return realtimeToolResult{
+		output:           output,
+		appResponse:      response.NewResponseWithID(code, response.ResponseEvent("workspace_tool"), evt.ResponseID, output, time.Now().UnixMilli()),
+		continueResponse: true,
+		textResponse:     true,
+		reason:           reason,
+	}
+}
+
+func workspaceFileOutput(file workspace.FileContent, includeContent bool) map[string]any {
+	out := map[string]any{
+		"path": file.Path,
+		"size": file.Size,
+	}
+	if includeContent {
+		out["content"] = file.Content
+	}
+	return out
 }
 
 func (c *Client) toolHTTPClient() *http.Client {
@@ -453,6 +553,14 @@ func toolExecutionHTTPError(evt *protocol.ResponseFunctionCallArgumentsDoneEvent
 		continueResponse: true,
 		reason:           code,
 	}
+}
+
+func redactedToolBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	return logger.RedactField("content", body)
 }
 
 func normalizeKnowledgeOutput(data map[string]any, searchQuery string) map[string]any {

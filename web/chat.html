@@ -1,0 +1,1689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TozoAI 项目助手</title>
+    <script src="/web/theme.js?v=20260607-theme" defer></script>
+    <style>
+        :root {
+            --bg: #f4f5f2;
+            --surface: #ffffff;
+            --surface-2: #eef0ec;
+            --line: #d7dbd2;
+            --text: #20231f;
+            --muted: #657066;
+            --accent: #1f7a4d;
+            --accent-2: #165c3a;
+            --danger: #b42318;
+            --warn: #8a5a00;
+            --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+            --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--sans);
+            font-size: 14px;
+        }
+
+        button, input, select, textarea {
+            font: inherit;
+        }
+
+        button {
+            min-height: 34px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--surface);
+            color: var(--text);
+            padding: 0 12px;
+            cursor: pointer;
+        }
+
+        button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-2); }
+        button:disabled { opacity: .45; cursor: not-allowed; }
+        button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+        button.primary:hover:not(:disabled) { background: var(--accent-2); color: #fff; }
+        button.danger { color: var(--danger); }
+
+        input, select, textarea {
+            width: 100%;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--surface);
+            color: var(--text);
+            padding: 8px 10px;
+            outline: none;
+        }
+
+        input:focus, select:focus, textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(31, 122, 77, .12);
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .app {
+            min-height: 100vh;
+            display: grid;
+            grid-template-rows: auto auto 1fr;
+        }
+
+        .topbar {
+            display: grid;
+            grid-template-columns: minmax(220px, 1fr) auto;
+            gap: 16px;
+            align-items: center;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--line);
+            background: var(--surface);
+        }
+
+        .brand {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
+        }
+
+        .brand strong { font-size: 16px; }
+        .brand span {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .top-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 34px;
+            padding: 0 10px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--surface-2);
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #9aa39a;
+        }
+
+        .dot.on { background: var(--accent); }
+        .dot.warn { background: var(--warn); }
+        .dot.err { background: var(--danger); }
+
+        .connection-panel {
+            border-bottom: 1px solid var(--line);
+            background: var(--surface);
+            padding: 8px 16px 12px;
+        }
+
+        .connection-panel summary {
+            cursor: pointer;
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 700;
+            user-select: none;
+        }
+
+        .connection-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(160px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        @media (max-width: 1100px) {
+            .connection-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+
+        @media (max-width: 640px) {
+            .connection-grid { grid-template-columns: 1fr; }
+        }
+
+        .workspace {
+            min-height: 0;
+            display: grid;
+            grid-template-columns: 280px minmax(360px, 1fr) 440px;
+            gap: 1px;
+            background: var(--line);
+        }
+
+        .pane {
+            min-width: 0;
+            min-height: 0;
+            background: var(--surface);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .pane-header {
+            min-height: 48px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .pane-title {
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .pane-body {
+            min-height: 0;
+            overflow: auto;
+            padding: 12px;
+        }
+
+        .stack {
+            display: grid;
+            gap: 12px;
+        }
+
+        .field-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .project-meta {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 12px;
+            word-break: break-all;
+        }
+
+        .file-toolbar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .file-path {
+            flex: 1;
+            min-width: 0;
+            font-family: var(--mono);
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-list {
+            display: grid;
+            gap: 2px;
+        }
+
+        .file-item {
+            width: 100%;
+            min-height: 32px;
+            border: 0;
+            border-radius: 5px;
+            background: transparent;
+            display: grid;
+            grid-template-columns: 18px 1fr;
+            gap: 8px;
+            align-items: center;
+            text-align: left;
+            padding: 0 8px;
+            color: var(--text);
+        }
+
+        .file-item:hover { background: var(--surface-2); color: var(--text); }
+        .file-item.active { background: #e4efe8; color: var(--accent-2); }
+        .file-type {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+        .file-name {
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            font-family: var(--mono);
+            font-size: 13px;
+        }
+
+        .editor-head {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .editor-path {
+            min-width: 0;
+            font-family: var(--mono);
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .editor-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        #editor.chat-output {
+            flex: 1;
+            min-height: 0;
+            border: 0;
+            border-radius: 0;
+            border-top: 1px solid var(--line);
+            padding: 14px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            background: var(--surface-2);
+        }
+
+        .editor-status {
+            min-height: 34px;
+            padding: 8px 12px;
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .chat-log {
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+            display: grid;
+            align-content: start;
+            gap: 8px;
+        }
+
+        .inspector-body {
+            min-height: 0;
+            overflow: auto;
+            padding: 12px;
+            display: grid;
+            gap: 12px;
+        }
+
+        .inspector-controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr auto;
+            gap: 8px;
+            align-items: end;
+        }
+
+        .token-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .token-card {
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--surface-2);
+            padding: 9px;
+            min-width: 0;
+        }
+
+        .token-card .label {
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .token-card .value {
+            margin-top: 4px;
+            font-family: var(--mono);
+            font-size: 17px;
+            color: var(--text);
+            word-break: break-all;
+        }
+
+        .chart-box {
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--surface);
+            padding: 10px;
+        }
+
+        #token-chart {
+            width: 100%;
+            height: 180px;
+            display: block;
+        }
+
+        .chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 12px;
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+        }
+
+        .legend-swatch {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            flex: 0 0 auto;
+        }
+
+        .raw-event {
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--surface);
+            overflow: hidden;
+        }
+
+        .raw-event header {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 8px;
+            align-items: center;
+            padding: 8px 9px;
+            border-bottom: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .raw-event pre {
+            margin: 0;
+            max-height: 260px;
+            overflow: auto;
+            padding: 9px;
+            background: #0f172a;
+            color: #dbeafe;
+            font-family: var(--mono);
+            font-size: 12px;
+            line-height: 1.45;
+            white-space: pre-wrap;
+        }
+
+        .msg {
+            display: grid;
+            gap: 5px;
+            max-width: 100%;
+        }
+
+        .msg .role {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .msg .content {
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            background: var(--surface);
+            padding: 10px 11px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.55;
+        }
+
+        .msg.user .content {
+            background: #e9f3ed;
+            border-color: #cfe2d6;
+        }
+
+        .msg.system .content {
+            background: var(--surface-2);
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .pending-write {
+            display: grid;
+            gap: 8px;
+        }
+
+        .pending-write header {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .pending-write strong {
+            color: var(--text);
+            font-size: 13px;
+        }
+
+        .pending-write .pending-path {
+            color: var(--muted);
+            font-family: var(--mono);
+            font-size: 12px;
+            word-break: break-all;
+        }
+
+        .pending-write pre {
+            max-height: 220px;
+            overflow: auto;
+            margin: 0;
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #111827;
+            color: #e5e7eb;
+            font-family: var(--mono);
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        .pending-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .pending-status {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .composer {
+            border-top: 1px solid var(--line);
+            padding: 12px;
+            display: grid;
+            gap: 10px;
+            background: var(--surface);
+        }
+
+        #prompt {
+            min-height: 86px;
+            resize: vertical;
+            line-height: 1.5;
+        }
+
+        .composer-actions {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .small {
+            color: var(--muted);
+            font-size: 12px;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        @media (max-width: 1100px) {
+            .workspace {
+                grid-template-columns: 260px 1fr;
+                grid-template-rows: minmax(420px, 1fr) minmax(420px, 1fr);
+            }
+            .inspector-pane {
+                grid-column: 1 / -1;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .topbar {
+                grid-template-columns: 1fr;
+            }
+            .workspace {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto auto;
+            }
+            .field-row {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <header class="topbar">
+        <div class="brand">
+            <strong>TozoAI 项目助手</strong>
+            <span id="root-label">项目未加载</span>
+        </div>
+        <div class="top-actions">
+            <span class="status"><span class="dot" id="conn-dot"></span><span id="conn-label">未连接</span></span>
+            <button id="btn-token" type="button">获取 Token</button>
+            <button class="primary" id="btn-connect" type="button">连接</button>
+            <button class="danger" id="btn-disconnect" type="button" disabled>断开</button>
+        </div>
+    </header>
+
+    <details class="connection-panel">
+        <summary>连接与服务端 OpenAI 配置</summary>
+        <div class="connection-grid">
+            <div>
+                <label for="user-id">用户 ID</label>
+                <input id="user-id" type="text" value="1001">
+            </div>
+            <div>
+                <label for="token">JWT Token</label>
+                <input id="token" type="password" placeholder="留空自动获取">
+            </div>
+            <div>
+                <label for="ws-url">本地 WebSocket</label>
+                <input id="ws-url" type="text">
+            </div>
+            <div>
+                <label for="upstream-model">会话模型</label>
+                <input id="upstream-model" type="text" value="gpt-realtime">
+            </div>
+            <div class="small" style="align-self:end; grid-column: span 2;">
+                AI 项目助手使用服务端 OpenAI 配置；中转地址和 Key 请在服务端配置或 WebSocket 测试面板调试。
+            </div>
+        </div>
+    </details>
+
+    <main class="workspace">
+        <aside class="pane project-pane">
+            <div class="pane-header">
+                <span class="pane-title">项目</span>
+                <button id="btn-refresh-projects" type="button">刷新</button>
+            </div>
+            <div class="pane-body stack">
+                <div>
+                    <label for="project-select">项目选择</label>
+                    <select id="project-select"></select>
+                </div>
+                <div class="project-meta" id="project-root">-</div>
+
+                <div>
+                    <div class="file-toolbar">
+                        <button id="btn-up" type="button">上级</button>
+                        <button id="btn-refresh-files" type="button">刷新文件</button>
+                    </div>
+                    <div class="file-path" id="dir-label">/</div>
+                    <div class="file-list" id="file-list"></div>
+                </div>
+            </div>
+        </aside>
+
+        <section class="pane conversation-pane">
+            <div class="pane-header editor-head">
+                <span class="editor-path" id="active-file">未选择上下文文件</span>
+                <div class="editor-actions">
+                    <button id="btn-clear-chat" type="button">清空对话</button>
+                </div>
+            </div>
+            <div class="chat-output" id="editor" aria-live="polite"></div>
+            <div class="editor-status" id="editor-status">就绪</div>
+            <div class="composer">
+                <textarea id="prompt" placeholder="询问当前项目，或要求修改文件"></textarea>
+                <div class="composer-actions">
+                    <span class="small" id="chat-context">project_id=current</span>
+                    <button class="primary" id="btn-send" type="button" disabled>发送</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="pane inspector-pane">
+            <div class="pane-header">
+                <span class="pane-title">原始响应与 Token</span>
+                <button id="btn-clear-events" type="button">清空事件</button>
+            </div>
+            <div class="inspector-body">
+                <div class="inspector-controls">
+                    <div>
+                        <label for="event-filter">筛选</label>
+                        <select id="event-filter">
+                            <option value="all">全部</option>
+                            <option value="response">响应事件</option>
+                            <option value="tool">工具事件</option>
+                            <option value="error">错误</option>
+                            <option value="log">日志记录</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="chart-shape">图表形状</label>
+                        <select id="chart-shape">
+                            <option value="bar">柱状图</option>
+                            <option value="line">折线图</option>
+                            <option value="stacked">堆叠柱状图</option>
+                            <option value="area">面积图</option>
+                            <option value="grouped">分组柱状图</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="chart-series">统计维度</label>
+                        <select id="chart-series">
+                            <option value="total">总量 token</option>
+                            <option value="input">输入 token</option>
+                            <option value="output">输出 token</option>
+                            <option value="cached">命中 token</option>
+                            <option value="missed">未命中 token</option>
+                            <option value="reasoning">推理 token</option>
+                            <option value="all">全部维度</option>
+                        </select>
+                    </div>
+                    <span class="small" id="event-count">0 条事件</span>
+                </div>
+
+                <div class="token-grid">
+                    <div class="token-card"><div class="label">本次总量</div><div class="value" id="token-current-total">0</div></div>
+                    <div class="token-card"><div class="label">本次输入</div><div class="value" id="token-current-input">0</div></div>
+                    <div class="token-card"><div class="label">本次输出</div><div class="value" id="token-current-output">0</div></div>
+                    <div class="token-card"><div class="label">本次命中</div><div class="value" id="token-current-cached">0</div></div>
+                    <div class="token-card"><div class="label">本次未命中</div><div class="value" id="token-current-missed">0</div></div>
+                    <div class="token-card"><div class="label">本次推理</div><div class="value" id="token-current-reasoning">0</div></div>
+                    <div class="token-card"><div class="label">累加总量</div><div class="value" id="token-cumulative-total">0</div></div>
+                    <div class="token-card"><div class="label">累加输入</div><div class="value" id="token-cumulative-input">0</div></div>
+                    <div class="token-card"><div class="label">累加输出</div><div class="value" id="token-cumulative-output">0</div></div>
+                    <div class="token-card"><div class="label">累加命中</div><div class="value" id="token-cumulative-cached">0</div></div>
+                    <div class="token-card"><div class="label">累加未命中</div><div class="value" id="token-cumulative-missed">0</div></div>
+                    <div class="token-card"><div class="label">累加推理</div><div class="value" id="token-cumulative-reasoning">0</div></div>
+                </div>
+
+                <div class="chart-box">
+                    <canvas id="token-chart" width="720" height="260"></canvas>
+                    <div class="chart-legend" id="chart-legend"></div>
+                </div>
+
+                <div class="chat-log" id="chat-log"></div>
+            </div>
+        </section>
+    </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// state 保存页面级运行状态：当前 WebSocket、JWT、项目、目录、打开文件和正在流式输出的助手气泡。
+// 这些字段只属于浏览器页面，不是服务端审计来源；真正的写入审计以服务端 pending write 为准。
+const state = {
+    ws: null,
+    token: '',
+    connected: false,
+    projectId: 'current',
+    projectRoot: '',
+    currentDir: '',
+    currentPath: '',
+    currentAssistant: null,
+    rawEvents: [],
+    tokenCurrent: emptyTokenStats(),
+    tokenCumulative: emptyTokenStats(),
+    tokenBuckets: []
+};
+
+// workspaceTools 是传给 OpenAI Realtime 的工具契约。
+// project_id/path/content 都必须是项目内相对语义；真正的路径逃逸、敏感文件和二进制限制由 Go service 层再次校验。
+const workspaceTools = [
+    {
+        type: 'function',
+        name: 'workspace_list_files',
+        description: '列出当前本地项目内的文件和目录。path 必须是项目内相对路径，空字符串表示项目根目录。',
+        parameters: {
+            type: 'object',
+            properties: {
+                project_id: { type: 'string', description: '项目 ID；省略时使用 current。' },
+                path: { type: 'string', description: '项目内相对目录路径；空字符串表示项目根目录。' }
+            },
+            required: [],
+            additionalProperties: false
+        }
+    },
+    {
+        type: 'function',
+        name: 'workspace_read_file',
+        description: '读取当前本地项目内的 UTF-8 文本文件。读取前应确认 path 是用户需要查看的项目内相对路径。',
+        parameters: {
+            type: 'object',
+            properties: {
+                project_id: { type: 'string', description: '项目 ID；省略时使用 current。' },
+                path: { type: 'string', description: '要读取的项目内相对文件路径。' }
+            },
+            required: ['path'],
+            additionalProperties: false
+        }
+    },
+    {
+        type: 'function',
+        name: 'workspace_write_file',
+        description: '提交当前本地项目内 UTF-8 文本文件的完整新内容。修改前必须先读取原文件，只做用户明确要求的最小改动。',
+        parameters: {
+            type: 'object',
+            properties: {
+                project_id: { type: 'string', description: '项目 ID；省略时使用 current。' },
+                path: { type: 'string', description: '要写入的项目内相对文件路径。' },
+                content: { type: 'string', description: '完整的新文件内容，不是补丁片段。' }
+            },
+            required: ['path', 'content'],
+            additionalProperties: false
+        }
+    }
+];
+
+document.addEventListener('DOMContentLoaded', () => {
+    $('ws-url').value = defaultWsURL();
+    bindEvents();
+    setConnected(false);
+    loadProjects().catch(showError);
+    appendMessage('system', '已加载项目助手页面。');
+    renderRawEvents();
+    updateTokenDisplay();
+    renderTokenChart();
+});
+
+// bindEvents 只绑定浏览器交互，不做业务判断。
+// 需要鉴权、路径校验、写入确认的操作都在对应 API 或 WebSocket 服务端再次校验。
+function bindEvents() {
+    $('btn-token').addEventListener('click', () => generateToken().catch(showError));
+    $('btn-connect').addEventListener('click', () => connectWS().catch(showError));
+    $('btn-disconnect').addEventListener('click', disconnectWS);
+    $('btn-refresh-projects').addEventListener('click', () => loadProjects().catch(showError));
+    $('btn-refresh-files').addEventListener('click', () => loadDir(state.currentDir).catch(showError));
+    $('btn-up').addEventListener('click', () => loadDir(parentDir(state.currentDir)).catch(showError));
+    $('btn-send').addEventListener('click', sendPrompt);
+    $('btn-clear-chat').addEventListener('click', () => {
+        $('editor').innerHTML = '';
+        state.currentAssistant = null;
+    });
+    $('btn-clear-events').addEventListener('click', clearRawEvents);
+    $('event-filter').addEventListener('change', renderRawEvents);
+    $('chart-shape').addEventListener('change', renderTokenChart);
+    $('chart-series').addEventListener('change', renderTokenChart);
+    document.addEventListener('tozo-theme-change', renderTokenChart);
+    $('project-select').addEventListener('change', () => {
+        state.projectId = $('project-select').value || 'current';
+        state.projectRoot = $('project-select').selectedOptions[0]?.dataset.root || '';
+        $('project-root').textContent = state.projectRoot || '-';
+        $('root-label').textContent = state.projectRoot || '项目未加载';
+        state.currentPath = '';
+        $('active-file').textContent = '未选择上下文文件';
+        updateChatContext();
+        loadDir('').catch(showError);
+    });
+    $('prompt').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            sendPrompt();
+        }
+    });
+}
+
+// defaultWsURL 根据当前页面协议生成本地 Realtime WebSocket 地址。
+// 上游中转地址和 key 只作为 query 传给本地服务，是否允许由服务端安全配置决定。
+function defaultWsURL() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${location.host}/ws/realtime/openai`;
+}
+
+// generateToken 调用本地测试 token 接口，方便开发环境直接连 WebSocket。
+// 生产页面应使用真实登录态或服务端签发的 JWT，不能依赖 /test/generate-token。
+async function generateToken() {
+    const userId = $('user-id').value.trim() || '1001';
+    const data = await fetchJSON(`/test/generate-token?userId=${encodeURIComponent(userId)}`, { auth: false });
+    state.token = data.token || '';
+    $('token').value = state.token;
+    appendMessage('system', `Token 已获取，用户 ID：${userId}`);
+    return state.token;
+}
+
+async function ensureToken() {
+    state.token = $('token').value.trim();
+    if (!state.token) {
+        await generateToken();
+    }
+    return state.token;
+}
+
+// fetchJSON 是页面访问 Workspace API 的统一入口。
+// 默认会附带 Bearer token；auth=false 只用于生成测试 token 这类公开开发接口。
+async function fetchJSON(path, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    if (options.auth !== false) {
+        await ensureToken();
+        headers.Authorization = `Bearer ${state.token}`;
+    }
+    if (options.body && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+    }
+    const resp = await fetch(path, {
+        method: options.method || 'GET',
+        headers,
+        body: options.body
+    });
+    const text = await resp.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!resp.ok || (json.code && json.code !== 200)) {
+        throw new Error(json.error || json.message || `HTTP ${resp.status}`);
+    }
+    return json.data ?? json;
+}
+
+// loadProjects 加载服务端允许访问的项目列表。
+// 当前后端只暴露 current，保留 select 是为了未来多项目工作区扩展。
+async function loadProjects() {
+    const projects = await fetchJSON('/api/workspace/projects');
+    const select = $('project-select');
+    select.innerHTML = '';
+    for (const project of projects) {
+        const option = document.createElement('option');
+        option.value = project.id;
+        option.textContent = project.name;
+        option.dataset.root = project.root;
+        select.appendChild(option);
+    }
+    if (projects.length > 0) {
+        state.projectId = projects[0].id;
+        state.projectRoot = projects[0].root;
+        select.value = state.projectId;
+        $('project-root').textContent = state.projectRoot;
+        $('root-label').textContent = state.projectRoot;
+    }
+    updateChatContext();
+    await loadDir('');
+}
+
+// loadDir 渲染项目内目录。
+// entry.path 来自服务端规范化后的相对路径，点击目录继续列表，点击文件走受控读取接口。
+async function loadDir(path) {
+    const entries = await fetchJSON(`/api/workspace/list?project_id=${encodeURIComponent(state.projectId)}&path=${encodeURIComponent(path || '')}`);
+    state.currentDir = path || '';
+    $('dir-label').textContent = state.currentDir ? `/${state.currentDir}` : '/';
+    const list = $('file-list');
+    list.innerHTML = '';
+    for (const entry of entries) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `file-item ${entry.path === state.currentPath ? 'active' : ''}`;
+        button.innerHTML = `<span class="file-type">${entry.type === 'dir' ? 'dir' : 'txt'}</span><span class="file-name"></span>`;
+        button.querySelector('.file-name').textContent = entry.name;
+        button.title = entry.path;
+        button.addEventListener('click', () => {
+            if (entry.type === 'dir') {
+                loadDir(entry.path).catch(showError);
+            } else {
+                openFile(entry.path).catch(showError);
+            }
+        });
+        list.appendChild(button);
+    }
+}
+
+// openFile 只把左侧文件设为当前对话上下文。
+// 文件内容由模型通过 workspace_read_file 工具读取，避免把聊天主区域重新变回文件编辑器。
+async function openFile(path) {
+    if (!path) return;
+    state.currentPath = path;
+    $('active-file').textContent = `当前上下文：${path}`;
+    $('editor-status').textContent = `已选择上下文文件 ${path}`;
+    appendMessage('system', `已选择上下文文件：${path}\n下方提问时会把这个路径带给模型；如需读取或修改，模型必须通过 workspace 工具执行。`);
+    recordRawEvent('log', 'workspace.context_selected', { project_id: state.projectId, path });
+    updateChatContext();
+    await loadDir(state.currentDir);
+}
+
+// connectWS 连接本地 Go Realtime 网关。
+// AI 项目助手不携带上游地址或 Key；上游凭据由服务端配置和安全策略统一管理。
+async function connectWS() {
+    await ensureToken();
+    disconnectWS(false);
+
+    const base = $('ws-url').value.trim() || defaultWsURL();
+    const query = new URLSearchParams();
+    query.set('token', state.token);
+    const upstreamModel = $('upstream-model').value.trim();
+    if (upstreamModel) query.set('upstream_model', upstreamModel);
+
+    const wsURL = `${base}${base.includes('?') ? '&' : '?'}${query.toString()}`;
+    setStatus('连接中', 'warn');
+    state.ws = new WebSocket(wsURL);
+
+    state.ws.onopen = () => {
+        setConnected(true);
+        sendSessionUpdate();
+        appendMessage('system', '已连接本地服务，使用服务端 OpenAI 配置。');
+        recordRawEvent('log', 'websocket.open', { model: upstreamModel || '' });
+    };
+    state.ws.onmessage = (event) => handleWSMessage(event.data);
+    state.ws.onerror = () => {
+        setStatus('连接错误', 'err');
+        recordRawEvent('error', 'websocket.error', { message: 'browser websocket error' });
+    };
+    state.ws.onclose = () => {
+        setConnected(false);
+        appendMessage('system', 'WebSocket 已断开。');
+        recordRawEvent('log', 'websocket.close', {});
+    };
+}
+
+// disconnectWS 主动关闭页面持有的 WebSocket。
+// showMessage=false 用于重连前的静默清理，避免聊天区出现重复断开提示。
+function disconnectWS(showMessage = true) {
+    if (state.ws) {
+        state.ws.onclose = null;
+        state.ws.close();
+        state.ws = null;
+    }
+    setConnected(false);
+    if (showMessage) appendMessage('system', 'WebSocket 已断开。');
+}
+
+// sendSessionUpdate 把项目工具和当前 project_id 下发给 Realtime session。
+// 服务端仍会按自己的协议转换和工具执行逻辑处理，前端这里仅声明模型可见的工具契约。
+function sendSessionUpdate() {
+    const model = $('upstream-model').value.trim() || 'gpt-realtime';
+    sendWS({
+        type: 'session.update',
+        session: {
+            type: 'realtime',
+            model,
+            output_modalities: ['text'],
+            instructions: [
+                '你是一个本地项目代码助手，回答使用用户语言。',
+                `当前 project_id=${state.projectId}。`,
+                '当用户询问项目结构时使用 workspace_list_files。',
+                '读取文件使用 workspace_read_file；修改文件前先读取原文件。',
+                '写文件使用 workspace_write_file，只做用户明确要求的改动，并在回复中列出变更路径。'
+            ].join('\n'),
+            tools: workspaceTools,
+            tool_choice: 'auto'
+        }
+    });
+}
+
+// sendPrompt 将用户问题和当前项目上下文写入会话，再触发 response.create。
+// 当前打开文件只作为提示上下文，不代表模型可以绕过 Workspace 工具直接写文件。
+function sendPrompt() {
+    const text = $('prompt').value.trim();
+    if (!text || !state.connected) return;
+
+    startTokenTurn();
+    const context = [
+        `project_id=${state.projectId}`,
+        state.currentPath ? `当前打开文件=${state.currentPath}` : '当前未打开文件'
+    ].join('\n');
+    appendMessage('user', text);
+    state.currentAssistant = appendMessage('assistant', '');
+    const itemEvent = {
+        type: 'conversation.item.create',
+        item: {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: `${context}\n\n用户问题：${text}` }]
+        }
+    };
+    sendWS(itemEvent);
+    const responseEvent = {
+        type: 'response.create',
+        response: {
+            output_modalities: ['text'],
+            instructions: '请基于当前项目上下文回答；如需查看或修改文件，使用 workspace 工具。'
+        }
+    };
+    sendWS(responseEvent);
+    $('prompt').value = '';
+}
+
+// sendWS 是 WebSocket 发送保护层。
+// 页面未连接时直接抛错，让调用方把失败显示到聊天区，而不是静默丢消息。
+function sendWS(payload) {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        throw new Error('WebSocket 未连接');
+    }
+    state.ws.send(JSON.stringify(payload));
+    recordRawEvent('log', `client.${payload.type || 'unknown'}`, payload);
+}
+
+// handleWSMessage 同时兼容网关包装事件和 OpenAI 原生 delta 事件。
+// 无法解析 JSON 的内容按系统消息展示，便于调试代理或上游返回异常文本。
+function handleWSMessage(raw) {
+    let data;
+    try {
+        data = JSON.parse(raw);
+    } catch {
+        appendMessage('system', raw);
+        recordRawEvent('log', 'websocket.raw_text', { raw });
+        return;
+    }
+
+    recordRawEvent(eventCategory(data), eventName(data), data);
+    updateTokenStatsFromEvent(data);
+
+    if (data.response) {
+        handleGatewayResponse(data);
+        return;
+    }
+    if (data.type === 'response.output_text.delta' || data.type === 'response.text.delta') {
+        appendAssistantDelta(data.delta || '');
+        return;
+    }
+    if (data.type === 'error') {
+        appendMessage('system', data.error?.message || JSON.stringify(data.error || data));
+    }
+}
+
+// handleGatewayResponse 渲染 Go 网关统一包装后的响应。
+// workspace_tool 事件会进入 pending diff UI，错误事件只显示给当前页面，不会自动重试写入。
+function handleGatewayResponse(data) {
+    switch (data.response) {
+        case 'session_created':
+        case 'session_updated':
+            setStatus('已配置会话', 'on');
+            break;
+        case 'begin':
+            startTokenTurn();
+            if (!state.currentAssistant) state.currentAssistant = appendMessage('assistant', '');
+            break;
+        case 'text_delta':
+            appendAssistantDelta(extractText(data.content));
+            break;
+        case 'end':
+            if (data.content && !state.currentAssistant) {
+                appendMessage('assistant', extractText(data.content));
+            }
+            state.currentAssistant = null;
+            break;
+        case 'workspace_tool':
+            handleWorkspaceTool(data.content || {});
+            break;
+        case 'error':
+            appendMessage('system', extractText(data.content) || JSON.stringify(data.content || data));
+            break;
+        default:
+            if (data.content) appendMessage('system', `${data.response}: ${summarize(data.content)}`);
+    }
+}
+
+// handleWorkspaceTool 处理模型工具执行结果。
+// 写文件成功如果返回 pending_write_id，页面只展示 diff，不会自动确认落盘。
+function handleWorkspaceTool(content) {
+    recordRawEvent(content.ok === false ? 'error' : 'tool', content.tool || 'workspace_tool', content);
+    const tool = content.tool || 'workspace_tool';
+    const path = content.path ? ` ${content.path}` : '';
+    if (content.ok) {
+        if (content.pending_write_id) {
+            appendPendingWriteCard(content);
+            return;
+        }
+        appendMessage('system', `${tool}${path} 已完成。`);
+        if (tool === 'workspace_write_file' && content.file?.path) {
+            const changed = content.file.path;
+            loadDir(dirname(changed)).catch(showError);
+            if (changed === state.currentPath) openFile(changed).catch(showError);
+        }
+    } else {
+        appendMessage('system', `${tool}${path} 失败：${content.error || '未知错误'}`);
+    }
+}
+
+// appendPendingWriteCard 展示一次待确认文件修改。
+// diff 来自服务端，按钮会调用确认/拒绝 API；用户未点击前，磁盘文件保持不变。
+function appendPendingWriteCard(pending) {
+    const content = appendMessage('system', '');
+    content.textContent = '';
+
+    const card = document.createElement('div');
+    card.className = 'pending-write';
+
+    const header = document.createElement('header');
+    const title = document.createElement('strong');
+    title.textContent = '文件修改待确认';
+    const path = document.createElement('span');
+    path.className = 'pending-path';
+    path.textContent = pending.path || '-';
+    header.append(title, path);
+
+    const diff = document.createElement('pre');
+    diff.textContent = pending.diff || '无 diff 内容';
+
+    const actions = document.createElement('div');
+    actions.className = 'pending-actions';
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'primary';
+    apply.textContent = '应用';
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.className = 'danger';
+    reject.textContent = '拒绝';
+    const status = document.createElement('span');
+    status.className = 'pending-status';
+    status.textContent = `pending_write_id=${pending.pending_write_id || '-'}`;
+    actions.append(apply, reject, status);
+
+    apply.addEventListener('click', () => confirmPendingWrite(pending, apply, reject, status).catch(showError));
+    reject.addEventListener('click', () => rejectPendingWrite(pending, apply, reject, status).catch(showError));
+
+    card.append(header, diff, actions);
+    content.appendChild(card);
+}
+
+// confirmPendingWrite 把用户确认动作提交到服务端。
+// 服务端会再次校验 pending 状态和路径，成功后刷新目录和当前打开文件。
+async function confirmPendingWrite(pending, apply, reject, status) {
+    setPendingButtons(apply, reject, true);
+    status.textContent = '正在应用...';
+    const result = await fetchJSON('/api/workspace/write/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ pending_write_id: pending.pending_write_id })
+    });
+    const file = result.file || {};
+    const changed = file.path || pending.path;
+    status.textContent = `已应用 ${changed}`;
+    if (changed) {
+        await loadDir(dirname(changed));
+        if (changed === state.currentPath) await openFile(changed);
+    }
+}
+
+// rejectPendingWrite 拒绝一次待确认修改。
+// 该操作只改变 pending 状态并写审计日志，不会写入或删除任何项目文件。
+async function rejectPendingWrite(pending, apply, reject, status) {
+    setPendingButtons(apply, reject, true);
+    status.textContent = '正在拒绝...';
+    await fetchJSON('/api/workspace/write/reject', {
+        method: 'POST',
+        body: JSON.stringify({ pending_write_id: pending.pending_write_id, reason: 'user rejected in chat panel' })
+    });
+    status.textContent = `已拒绝 ${pending.path || ''}`;
+}
+
+function setPendingButtons(apply, reject, disabled) {
+    apply.disabled = disabled;
+    reject.disabled = disabled;
+}
+
+function appendAssistantDelta(text) {
+    if (!text) return;
+    if (!state.currentAssistant) state.currentAssistant = appendMessage('assistant', '');
+    state.currentAssistant.textContent += text;
+    scrollConversation();
+}
+
+function appendMessage(role, text) {
+    const wrap = document.createElement('div');
+    wrap.className = `msg ${role}`;
+    const title = document.createElement('div');
+    title.className = 'role';
+    title.textContent = role === 'user' ? '你' : role === 'assistant' ? '助手' : '系统';
+    const content = document.createElement('div');
+    content.className = 'content';
+    content.textContent = text;
+    wrap.append(title, content);
+    $('editor').appendChild(wrap);
+    scrollConversation();
+    return content;
+}
+
+function setConnected(connected) {
+    state.connected = connected;
+    $('btn-connect').disabled = connected;
+    $('btn-disconnect').disabled = !connected;
+    $('btn-send').disabled = !connected;
+    setStatus(connected ? '已连接' : '未连接', connected ? 'on' : '');
+}
+
+function setStatus(text, tone) {
+    $('conn-label').textContent = text;
+    $('conn-dot').className = `dot ${tone || ''}`;
+}
+
+function updateChatContext() {
+    const path = state.currentPath ? ` · file=${state.currentPath}` : '';
+    $('chat-context').textContent = `project_id=${state.projectId}${path}`;
+}
+
+function showError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    $('editor-status').textContent = message;
+    appendMessage('system', message);
+    recordRawEvent('error', 'ui.error', { message });
+}
+
+function extractText(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.content === 'string') return value.content;
+    if (typeof value.error === 'string') return value.error;
+    return summarize(value);
+}
+
+function summarize(value) {
+    try {
+        const text = JSON.stringify(value, null, 2);
+        return text.length > 1200 ? `${text.slice(0, 1200)}\n...` : text;
+    } catch {
+        return String(value);
+    }
+}
+
+function dirname(path) {
+    const normalized = (path || '').replaceAll('\\', '/');
+    const index = normalized.lastIndexOf('/');
+    return index > 0 ? normalized.slice(0, index) : '';
+}
+
+function parentDir(path) {
+    return dirname(path || '');
+}
+
+function formatBytes(size) {
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function scrollConversation() {
+    const log = $('editor');
+    log.scrollTop = log.scrollHeight;
+}
+
+function emptyTokenStats() {
+    return { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 };
+}
+
+// startTokenTurn 开启一次新的用户提问统计窗口。
+// 累加值不清零，只把“本次”口径归零，便于右侧同时看单轮和页面生命周期总量。
+function startTokenTurn() {
+    state.tokenCurrent = emptyTokenStats();
+    updateTokenDisplay();
+}
+
+function eventCategory(data) {
+    const name = eventName(data);
+    if (name.includes('error')) return 'error';
+    if (name.includes('workspace_tool') || name.includes('tool')) return 'tool';
+    if (name.startsWith('response') || name.includes('text_delta') || name === 'begin' || name === 'end') return 'response';
+    return 'log';
+}
+
+function eventName(data) {
+    return data?.type || data?.response || data?.event || 'unknown';
+}
+
+// recordRawEvent 保存右侧原始事件列表。
+// 这里只记录浏览器看到的结构化数据，不落盘；真正的服务端日志仍由 Go 后端负责。
+function recordRawEvent(category, type, payload) {
+    state.rawEvents.unshift({
+        at: new Date().toISOString(),
+        category,
+        type: type || 'unknown',
+        payload
+    });
+    if (state.rawEvents.length > 300) {
+        state.rawEvents.length = 300;
+    }
+    renderRawEvents();
+}
+
+function clearRawEvents() {
+    state.rawEvents = [];
+    renderRawEvents();
+}
+
+function renderRawEvents() {
+    const filter = $('event-filter').value || 'all';
+    const list = $('chat-log');
+    list.innerHTML = '';
+    const events = state.rawEvents.filter(item => filter === 'all' || item.category === filter);
+    $('event-count').textContent = `${events.length}/${state.rawEvents.length} 条事件`;
+    if (events.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'small';
+        empty.textContent = '暂无事件';
+        list.appendChild(empty);
+        return;
+    }
+    for (const item of events.slice(0, 120)) {
+        const card = document.createElement('article');
+        card.className = 'raw-event';
+        const header = document.createElement('header');
+        const badge = document.createElement('span');
+        badge.textContent = item.category;
+        const title = document.createElement('strong');
+        title.textContent = item.type;
+        const time = document.createElement('span');
+        time.textContent = new Date(item.at).toLocaleTimeString();
+        header.append(badge, title, time);
+        const pre = document.createElement('pre');
+        pre.textContent = summarizeLong(item.payload, 6000);
+        card.append(header, pre);
+        list.appendChild(card);
+    }
+}
+
+// updateTokenStatsFromEvent 从 OpenAI/Reatime 响应事件中提取 usage。
+// 不同中转服务可能把 usage 放在顶层、response、content 或嵌套 response.usage 中，因此这里做有限递归查找。
+function updateTokenStatsFromEvent(data) {
+    const usage = findUsage(data);
+    if (!usage) return;
+    const delta = normalizeUsage(usage);
+    addTokenStats(state.tokenCurrent, delta);
+    addTokenStats(state.tokenCumulative, delta);
+    addTokenBucket(delta);
+    updateTokenDisplay();
+    renderTokenChart();
+}
+
+function findUsage(value, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 5) return null;
+    if (value.usage && typeof value.usage === 'object') return value.usage;
+    for (const key of ['response', 'content', 'data', 'result']) {
+        const nested = findUsage(value[key], depth + 1);
+        if (nested) return nested;
+    }
+    return null;
+}
+
+function normalizeUsage(usage) {
+    const input = numeric(usage.input_tokens) || numeric(usage.prompt_tokens);
+    const output = numeric(usage.output_tokens) || numeric(usage.completion_tokens);
+    const total = numeric(usage.total_tokens) || input + output;
+    const inputDetails = usage.input_tokens_details || usage.input_token_details || usage.prompt_tokens_details || {};
+    const outputDetails = usage.output_tokens_details || usage.output_token_details || usage.completion_tokens_details || {};
+    const cached = numeric(usage.cached_tokens) +
+        numeric(usage.cache_read_input_tokens) +
+        numeric(inputDetails.cached_tokens) +
+        numeric(outputDetails.cached_tokens);
+    const reasoning = numeric(usage.reasoning_tokens) +
+        numeric(inputDetails.reasoning_tokens) +
+        numeric(outputDetails.reasoning_tokens);
+    return { input, output, cached, reasoning, total };
+}
+
+function addTokenStats(target, delta) {
+    target.input += delta.input;
+    target.output += delta.output;
+    target.cached += delta.cached;
+    target.reasoning += delta.reasoning;
+    target.total += delta.total;
+}
+
+function addTokenBucket(delta) {
+    const label = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    let bucket = state.tokenBuckets[state.tokenBuckets.length - 1];
+    if (!bucket || bucket.label !== label) {
+        bucket = { label, input: 0, output: 0, cached: 0, reasoning: 0, total: 0 };
+        state.tokenBuckets.push(bucket);
+        if (state.tokenBuckets.length > 24) {
+            state.tokenBuckets.shift();
+        }
+    }
+    addTokenStats(bucket, delta);
+}
+
+function updateTokenDisplay() {
+    const currentMissed = Math.max(0, state.tokenCurrent.input - state.tokenCurrent.cached);
+    const cumulativeMissed = Math.max(0, state.tokenCumulative.input - state.tokenCumulative.cached);
+    text('token-current-total', number(state.tokenCurrent.total));
+    text('token-current-input', number(state.tokenCurrent.input));
+    text('token-current-output', number(state.tokenCurrent.output));
+    text('token-current-cached', number(state.tokenCurrent.cached));
+    text('token-current-missed', number(currentMissed));
+    text('token-current-reasoning', number(state.tokenCurrent.reasoning));
+    text('token-cumulative-total', number(state.tokenCumulative.total));
+    text('token-cumulative-input', number(state.tokenCumulative.input));
+    text('token-cumulative-output', number(state.tokenCumulative.output));
+    text('token-cumulative-cached', number(state.tokenCumulative.cached));
+    text('token-cumulative-missed', number(cumulativeMissed));
+    text('token-cumulative-reasoning', number(state.tokenCumulative.reasoning));
+}
+
+// renderTokenChart 使用原生 canvas 展示每个时间段 token 总量。
+// 形状由 chart-shape 控制：bar 看总量，line/area 看趋势，stacked/grouped 对比不同 token 类型。
+function renderTokenChart() {
+    const canvas = $('token-chart');
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const chartBg = cssVar('--surface', '#f8faf7');
+    const muted = cssVar('--muted', '#657066');
+    const line = cssVar('--line', '#d7dbd2');
+    const accent = cssVar('--accent', '#1f7a4d');
+    const warn = cssVar('--warn', '#8a5a00');
+    const danger = cssVar('--danger', '#b42318');
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = chartBg;
+    ctx.fillRect(0, 0, width, height);
+
+    const rows = state.tokenBuckets;
+    const shape = $('chart-shape').value || 'bar';
+    const series = tokenSeriesDefinitions($('chart-series').value || 'total', {
+        total: accent,
+        input: accent,
+        output: danger,
+        cached: warn,
+        missed: danger,
+        reasoning: muted
+    });
+    renderTokenLegend(series);
+
+    ctx.fillStyle = muted;
+    ctx.font = '12px sans-serif';
+    if (rows.length === 0) {
+        ctx.fillText('暂无 token 数据', 24, 34);
+        return;
+    }
+
+    const padding = { left: 42, right: 18, top: 18, bottom: 38 };
+    const plotW = width - padding.left - padding.right;
+    const plotH = height - padding.top - padding.bottom;
+    const maxTotal = Math.max(1, ...rows.flatMap(row => series.map(item => tokenSeriesValue(row, item.key))));
+
+    ctx.strokeStyle = line;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, padding.top + plotH);
+    ctx.lineTo(padding.left + plotW, padding.top + plotH);
+    ctx.stroke();
+
+    if (shape === 'line') {
+        drawTokenLineChart(ctx, rows, padding, plotW, plotH, maxTotal, series);
+    } else if (shape === 'area') {
+        drawTokenAreaChart(ctx, rows, padding, plotW, plotH, maxTotal, series);
+    } else if (shape === 'grouped') {
+        drawGroupedTokenChart(ctx, rows, padding, plotW, plotH, maxTotal, series);
+    } else {
+        drawTokenBarChart(ctx, rows, padding, plotW, plotH, maxTotal, shape, series);
+    }
+
+    ctx.fillStyle = muted;
+    rows.forEach((row, index) => {
+        const x = padding.left + (rows.length === 1 ? plotW / 2 : index * plotW / Math.max(1, rows.length - 1));
+        ctx.fillText(row.label, Math.max(4, x - 18), height - 14);
+    });
+    ctx.fillText(`max ${number(maxTotal)}`, 8, padding.top + 8);
+}
+
+function renderTokenLegend(series) {
+    const legend = $('chart-legend');
+    legend.innerHTML = '';
+    for (const item of series) {
+        const wrap = document.createElement('span');
+        wrap.className = 'legend-item';
+        const swatch = document.createElement('span');
+        swatch.className = 'legend-swatch';
+        swatch.style.background = item.color;
+        const label = document.createElement('span');
+        label.textContent = item.label;
+        wrap.append(swatch, label);
+        legend.appendChild(wrap);
+    }
+}
+
+function tokenSeriesDefinitions(selected, colors) {
+    const all = [
+        { key: 'input', label: '输入', color: colors.input },
+        { key: 'output', label: '输出', color: colors.output },
+        { key: 'cached', label: '命中', color: colors.cached },
+        { key: 'missed', label: '未命中', color: colors.missed },
+        { key: 'reasoning', label: '推理', color: colors.reasoning }
+    ];
+    if (selected === 'all' || selected === 'grouped') return all;
+    if (selected === 'total') return [{ key: 'total', label: '总量', color: colors.total }];
+    return all.filter(item => item.key === selected);
+}
+
+function drawTokenLineChart(ctx, rows, padding, plotW, plotH, maxTotal, series) {
+    for (const item of series) {
+        drawSingleTokenLine(ctx, rows, padding, plotW, plotH, maxTotal, item);
+    }
+}
+
+function drawSingleTokenLine(ctx, rows, padding, plotW, plotH, maxTotal, series) {
+    ctx.strokeStyle = series.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    rows.forEach((row, index) => {
+        const point = tokenPoint(tokenSeriesValue(row, series.key), index, rows.length, padding, plotW, plotH, maxTotal);
+        if (index === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+    });
+    ctx.stroke();
+}
+
+function drawTokenAreaChart(ctx, rows, padding, plotW, plotH, maxTotal, series) {
+    const bottom = padding.top + plotH;
+    for (const item of series) {
+        ctx.beginPath();
+        rows.forEach((row, index) => {
+            const point = tokenPoint(tokenSeriesValue(row, item.key), index, rows.length, padding, plotW, plotH, maxTotal);
+            if (index === 0) ctx.moveTo(point.x, bottom);
+            ctx.lineTo(point.x, point.y);
+        });
+        const lastX = padding.left + (rows.length === 1 ? plotW / 2 : plotW);
+        ctx.lineTo(lastX, bottom);
+        ctx.closePath();
+        ctx.fillStyle = alphaColor(item.color, 0.16);
+        ctx.fill();
+        drawSingleTokenLine(ctx, rows, padding, plotW, plotH, maxTotal, item);
+    }
+}
+
+function drawTokenBarChart(ctx, rows, padding, plotW, plotH, maxTotal, shape, series) {
+    const gap = 8;
+    const barW = Math.max(8, (plotW - gap * (rows.length - 1)) / rows.length);
+    rows.forEach((row, index) => {
+        const x = padding.left + index * (barW + gap);
+        if (shape === 'stacked') {
+            let y = padding.top + plotH;
+            for (const item of series) {
+                const partH = tokenSeriesValue(row, item.key) / maxTotal * plotH;
+                y -= partH;
+                ctx.fillStyle = item.color;
+                ctx.fillRect(x, y, barW, partH);
+            }
+            return;
+        }
+        const item = series[0];
+        const valueH = tokenSeriesValue(row, item.key) / maxTotal * plotH;
+        ctx.fillStyle = item.color;
+        ctx.fillRect(x, padding.top + plotH - valueH, barW, valueH);
+    });
+}
+
+function drawGroupedTokenChart(ctx, rows, padding, plotW, plotH, maxTotal, series) {
+    const groupGap = 10;
+    const innerGap = 2;
+    const groupW = Math.max(22, (plotW - groupGap * (rows.length - 1)) / rows.length);
+    const barW = Math.max(3, (groupW - innerGap * (series.length - 1)) / series.length);
+    rows.forEach((row, index) => {
+        const baseX = padding.left + index * (groupW + groupGap);
+        series.forEach((item, keyIndex) => {
+            const value = tokenSeriesValue(row, item.key);
+            const barH = value / maxTotal * plotH;
+            ctx.fillStyle = item.color;
+            ctx.fillRect(baseX + keyIndex * (barW + innerGap), padding.top + plotH - barH, barW, barH);
+        });
+    });
+}
+
+function tokenPoint(value, index, length, padding, plotW, plotH, maxTotal) {
+    return {
+        x: padding.left + (length === 1 ? plotW / 2 : index * plotW / (length - 1)),
+        y: padding.top + plotH - value / maxTotal * plotH
+    };
+}
+
+function missedTokens(row) {
+    return Math.max(0, numeric(row.input) - numeric(row.cached));
+}
+
+function tokenSeriesValue(row, key) {
+    return key === 'missed' ? missedTokens(row) : numeric(row[key]);
+}
+
+function alphaColor(color, alpha) {
+    if (!color || !color.startsWith('#') || color.length !== 7) {
+        return color;
+    }
+    const value = Number.parseInt(color.slice(1), 16);
+    if (!Number.isFinite(value)) return color;
+    const red = (value >> 16) & 255;
+    const green = (value >> 8) & 255;
+    const blue = value & 255;
+    return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function text(id, value) {
+    const el = $(id);
+    if (el) el.textContent = value == null || value === '' ? '-' : String(value);
+}
+
+function cssVar(name, fallback = '') {
+    const bodyValue = getComputedStyle(document.body).getPropertyValue(name).trim();
+    if (bodyValue) return bodyValue;
+    const rootValue = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return rootValue || fallback;
+}
+
+function number(value) {
+    const n = Number(value || 0);
+    return Number.isFinite(n) ? n.toLocaleString() : '0';
+}
+
+function numeric(value) {
+    const n = Number(value || 0);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function summarizeLong(value, limit) {
+    const text = summarize(value);
+    return text.length > limit ? `${text.slice(0, limit)}\n...` : text;
+}
+</script>
+</body>
+</html>

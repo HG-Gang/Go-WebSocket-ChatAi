@@ -14,6 +14,8 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,9 +33,34 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
-		return conf.IsDev() || r.Header.Get("Origin") == "https://your-app-domain.com"
-	},
+	CheckOrigin:     checkRealtimeOrigin,
+}
+
+func checkRealtimeOrigin(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if conf.IsDev() {
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		host := strings.ToLower(u.Hostname())
+		return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	}
+	if conf.Global == nil {
+		return false
+	}
+	for _, allowed := range conf.Global.Security.AllowedOrigins {
+		if strings.EqualFold(strings.TrimSpace(allowed), origin) {
+			return true
+		}
+	}
+	return false
 }
 
 // generateRequestID 生成全局唯一 requestId
@@ -61,6 +88,7 @@ func OpenAIRealtimeHandler(c *gin.Context) {
 		return
 	}
 	uid, _ := userID.(string)
+	userName := c.GetString("user_name")
 
 	// 2. 生成 requestId（本次连接的全局唯一标识）
 	requestID := generateRequestID(uid)
@@ -76,19 +104,24 @@ func OpenAIRealtimeHandler(c *gin.Context) {
 	if deviceID == "" {
 		deviceID = c.Query("device_id")
 	}
+	ipLocation := clientIPLocationFromRequest(c)
 	reqLog := log.With(
 		zap.String("request_id", requestID),
 		zap.String("user_id", uid),
+		zap.String("user_name", userName),
 		zap.String("device_id", deviceID),
 		zap.String("remote_addr", remoteAddr),
+		zap.Any("ip_location", ipLocation),
 	)
 	reqLog.Info("收到 WS 连接请求")
 
 	if !session.TryAcquireCapacity() {
 		metrics.CapacityRejected()
+		activeSessions := session.ActiveCount()
 		reqLog.Warn("实例活跃会话数已达上限，拒绝新 WS 连接",
-			zap.Int64("active_sessions", session.ActiveCount()),
+			zap.Int64("active_sessions", activeSessions),
 			zap.Int64("max_active_sessions", conf.Global.Capacity.MaxActiveSessions))
+		notifyCapacityOverloadAlert(reqLog, "openai", uid, userName, remoteAddr, ipLocation, activeSessions)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "server overloaded, retry another node"})
 		return
 	}
@@ -97,14 +130,20 @@ func OpenAIRealtimeHandler(c *gin.Context) {
 	// 4. 检查模型配置状态
 	modelName := "openai"
 	modelCfg := conf.GetModel(modelName)
-	if modelCfg == nil || !modelCfg.Enabled {
+	connectionCfg, err := realtimeConfigFromQuery(c, modelCfg)
+	if err != nil {
+		reqLog.Warn("Realtime override 参数无效", zap.Error(err))
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !connectionCfg.Enabled {
 		reqLog.Warn("模型请求被拒绝：openai 未启用或配置丢失")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "openai model is not enabled"})
 		return
 	}
 
 	// 5. 通过工厂创建 Provider 实例
-	prov := provider.Create(modelName)
+	prov := provider.CreateWithConfig(modelName, &connectionCfg)
 	if prov == nil {
 		reqLog.Error("Provider 创建失败：未找到对应的处理器工厂")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initialize openai provider"})
@@ -120,13 +159,104 @@ func OpenAIRealtimeHandler(c *gin.Context) {
 	defer appConn.Close()
 
 	// 7. 创建并运行实时会话（传入 requestId，贯穿全链路日志）
-	sess := session.NewSession(uid, modelName, requestID, remoteAddr, userAgent, deviceID, appConn, prov)
+	sess := session.NewSession(uid, userName, modelName, requestID, remoteAddr, userAgent, deviceID, appConn, prov)
+	sess.SetClientLocation(ipLocation)
 	defer sess.Close()
 
 	// 8. 启动会话处理循环（阻塞直到会话退出）
 	sess.Start(c.Request.Context())
 
 	reqLog.Info("WebSocket 会话结束")
+}
+
+func realtimeConfigFromQuery(c *gin.Context, base *conf.ModelConfig) (conf.ModelConfig, error) {
+	cfg := conf.ModelConfig{Enabled: true}
+	if base != nil {
+		cfg = *base
+		if base.Extra != nil {
+			cfg.Extra = make(map[string]interface{}, len(base.Extra))
+			for key, value := range base.Extra {
+				cfg.Extra[key] = value
+			}
+		}
+	}
+
+	wsURL := firstQuery(c, "upstream_ws_url", "upstream_url", "realtime_url")
+	apiKey := firstQuery(c, "upstream_api_key", "api_key")
+	model := firstQuery(c, "upstream_model", "model")
+	endpoint := firstQuery(c, "upstream_endpoint", "endpoint")
+
+	if apiKey != "" && (conf.Global == nil || !conf.Global.Security.AllowUpstreamQueryKey) {
+		return cfg, fmt.Errorf("upstream api key query override is disabled")
+	}
+
+	hasOverride := wsURL != "" || apiKey != "" || model != "" || endpoint != ""
+	if hasOverride {
+		cfg.Enabled = true
+	}
+
+	if wsURL != "" {
+		normalizedURL, err := normalizeRealtimeUpstreamURL(wsURL)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Realtime.WsUrl = normalizedURL
+	}
+	if apiKey != "" {
+		cfg.APIKey = apiKey
+	}
+	if model != "" {
+		cfg.DefaultModel = model
+	}
+	if endpoint != "" {
+		cfg.Endpoint = endpoint
+	}
+
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		return cfg, fmt.Errorf("upstream API key is required")
+	}
+	return cfg, nil
+}
+
+func normalizeRealtimeUpstreamURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("upstream_ws_url must be a valid ws://, wss://, http://, or https:// URL")
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "wss", "ws":
+	case "https":
+		parsed.Scheme = "wss"
+		parsed.Path = normalizeRealtimePath(parsed.Path)
+	case "http":
+		parsed.Scheme = "ws"
+		parsed.Path = normalizeRealtimePath(parsed.Path)
+	default:
+		return "", fmt.Errorf("upstream_ws_url must use ws://, wss://, http://, or https://")
+	}
+	return parsed.String(), nil
+}
+
+func normalizeRealtimePath(path string) string {
+	cleanPath := strings.TrimRight(strings.TrimSpace(path), "/")
+	switch cleanPath {
+	case "", "/":
+		return "/v1/realtime"
+	case "/v1":
+		return "/v1/realtime"
+	default:
+		return path
+	}
+}
+
+func firstQuery(c *gin.Context, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(c.Query(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // OpenAIFallbackHandler OpenAI HTTP 降级接口

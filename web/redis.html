@@ -6,6 +6,7 @@
     <title>TozoAI Redis 监控面板</title>
     <!-- Layui 样式资源 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.21/dist/css/layui.css">
+    <script src="/web/theme.js?v=20260607-theme" defer></script>
     <style>
         body { background: #f2f2f2; padding: 15px; }
         .header-bar {
@@ -82,6 +83,7 @@
     </div>
     <div>
         <a href="/web/" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">WS 测试面板</a>
+        <a href="/web/chat.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">聊天看板</a>
         <a href="/web/audio.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">语音测试</a>
         <a href="/web/diagnostics.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">诊断看板</a>
         <a href="/web/responses.html" target="_blank" rel="noopener noreferrer" class="layui-btn layui-btn-sm layui-btn-primary nav-link">Responses 测试</a>
@@ -233,11 +235,12 @@ layui.use(['table', 'form'], function() {
         { field: 'description', title: '作用解释', minWidth: 260, templet: function(d) {
             return '<div class="key-desc">' + escapeHtml(d.description || '-') + '</div>';
         }},
-        { field: 'value', title: '完整值（JSON）', minWidth: 520, templet: function(d) {
+        { field: 'value', title: '脱敏值预览（JSON）', minWidth: 520, templet: function(d) {
             const display = typeof d.value === 'object' && d.value !== null
                 ? JSON.stringify(d.value, null, 2)
                 : String(d.value);
-            return '<div class="json-value">' + escapeHtml(display) + '</div>';
+            const safe = d.value_safe ? '<div class="key-desc">敏感字段已脱敏，只保留运营排障所需摘要。</div>' : '';
+            return safe + '<div class="json-value">' + escapeHtml(display) + '</div>';
         }}
     ]];
 
