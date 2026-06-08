@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TozoAI 诊断看板</title>
     <link rel="stylesheet" href="style.css">
+    <script src="/web/theme.js?v=20260607-theme" defer></script>
     <style>
         .container { max-width: 1440px; }
         .nav a { color: var(--accent-blue); text-decoration: none; margin: 0 8px; font-size: 13px; }
@@ -52,6 +53,24 @@
         .session-table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
         .session-table-wrap .table-lite th { position: sticky; top: 0; background: var(--bg-secondary); z-index: 1; }
         .mono-cell { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
+        .resource-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:14px; }
+        @media (max-width: 1100px) { .resource-grid { grid-template-columns: 1fr; } }
+        .resource-block {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+            padding: 12px;
+            min-width: 0;
+        }
+        .resource-title { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+        .resource-title strong { font-size: 14px; }
+        .resource-summary { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; margin-bottom:10px; }
+        .resource-summary .metric { min-height: 58px; padding: 8px; }
+        .resource-bars { display:grid; gap:7px; }
+        .resource-row { display:grid; grid-template-columns: 72px minmax(0, 1fr) 86px; gap:8px; align-items:center; font-family:var(--font-mono); font-size:12px; color:var(--text-secondary); }
+        .resource-track { height:8px; border-radius:999px; background:var(--bg-primary); border:1px solid var(--border); overflow:hidden; }
+        .resource-fill { display:block; height:100%; width:0; background:var(--accent-blue); }
+        .resource-empty { color:var(--text-muted); font-size:12px; }
     </style>
 </head>
 <body>
@@ -61,6 +80,7 @@
         <p class="subtitle">App / Go / Redis / OpenAI Realtime 运行状态聚合</p>
         <div class="nav" style="margin-top:8px;">
             <a href="/web/" target="_blank" rel="noopener noreferrer">WS 消息测试</a>
+            <a href="/web/chat.html" target="_blank" rel="noopener noreferrer">聊天看板</a>
             <a href="/web/audio.html" target="_blank" rel="noopener noreferrer">语音对话测试</a>
             <a href="/web/redis.html" target="_blank" rel="noopener noreferrer">Redis 监控</a>
             <a href="/web/responses.html" target="_blank" rel="noopener noreferrer">Responses 测试</a>
@@ -103,6 +123,12 @@
                 <td>耳机/浏览器音频链路、PCM16/base64、OpenAI 音频 delta、播放卡顿</td>
             </tr>
             <tr>
+                <td>聊天看板</td>
+                <td>模型配置列表、聊天响应、上传文件、上传图片、请求汇总、图表、请求明细表、原始指标 JSON</td>
+                <td>生成 token、选择模型配置、发送 Responses 请求、上传图片/文件、刷新看板、切换列表/卡片/原始数据</td>
+                <td>普通 GPT 问答、图片/文件解析、每次请求 token/费用/耗时/API Key/端点核对</td>
+            </tr>
+            <tr>
                 <td>Redis 监控</td>
                 <td>Key、类型、TTL、值预览、String/Hash/其他类型统计、最后刷新时间</td>
                 <td>按 pattern 扫描、手动刷新、自动刷新</td>
@@ -141,6 +167,8 @@
             <div class="metric"><div class="label">Heap Inuse</div><div class="value" id="m-heap">-</div><div class="sub">堆使用中</div></div>
             <div class="metric"><div class="label">Sys</div><div class="value" id="m-sys">-</div><div class="sub">Go 向系统申请</div></div>
             <div class="metric"><div class="label">GC</div><div class="value" id="m-gc">-</div><div class="sub" id="m-gc-pause">-</div></div>
+            <div class="metric"><div class="label">过载告警</div><div class="value" id="m-alert-status">-</div><div class="sub" id="m-alert-reasons">-</div></div>
+            <div class="metric"><div class="label">最近恢复</div><div class="value" id="m-alert-last-recovered">-</div><div class="sub">alert_recovered / dingtalk_sent 会写入按天日志</div></div>
         </div>
     </section>
 
@@ -254,13 +282,53 @@
     </section>
 
     <section class="panel">
+        <h2>天 / 周 / 月资源统计图</h2>
+        <p class="hint">数据来自 /api/stats/resources 的统一资源统计，按天、近 7 天、近 30 天展示请求、Token、缓存命中、推理、费用、失败、告警和 Workspace 写入。</p>
+        <div class="resource-grid">
+            <div class="resource-block">
+                <div class="resource-title"><strong>今天</strong><span class="badge" id="rs-day-window">day</span></div>
+                <div class="resource-summary">
+                    <div class="metric"><div class="label">请求 / 失败</div><div class="value" id="rs-day-requests">-</div><div class="sub" id="rs-day-ops">-</div></div>
+                    <div class="metric"><div class="label">Token</div><div class="value" id="rs-day-tokens">-</div><div class="sub" id="rs-day-token-detail">-</div></div>
+                    <div class="metric"><div class="label">业务缓存</div><div class="value" id="rs-day-cache">-</div></div>
+                    <div class="metric"><div class="label">费用</div><div class="value" id="rs-day-cost">-</div></div>
+                    <div class="metric"><div class="label">平均延迟</div><div class="value" id="rs-day-latency">-</div></div>
+                </div>
+                <div class="resource-bars" id="rs-day-bars"><div class="resource-empty">暂无数据</div></div>
+            </div>
+            <div class="resource-block">
+                <div class="resource-title"><strong>近 7 天</strong><span class="badge" id="rs-week-window">week</span></div>
+                <div class="resource-summary">
+                    <div class="metric"><div class="label">请求 / 失败</div><div class="value" id="rs-week-requests">-</div><div class="sub" id="rs-week-ops">-</div></div>
+                    <div class="metric"><div class="label">Token</div><div class="value" id="rs-week-tokens">-</div><div class="sub" id="rs-week-token-detail">-</div></div>
+                    <div class="metric"><div class="label">业务缓存</div><div class="value" id="rs-week-cache">-</div></div>
+                    <div class="metric"><div class="label">费用</div><div class="value" id="rs-week-cost">-</div></div>
+                    <div class="metric"><div class="label">平均延迟</div><div class="value" id="rs-week-latency">-</div></div>
+                </div>
+                <div class="resource-bars" id="rs-week-bars"><div class="resource-empty">暂无数据</div></div>
+            </div>
+            <div class="resource-block">
+                <div class="resource-title"><strong>近 30 天</strong><span class="badge" id="rs-month-window">month</span></div>
+                <div class="resource-summary">
+                    <div class="metric"><div class="label">请求 / 失败</div><div class="value" id="rs-month-requests">-</div><div class="sub" id="rs-month-ops">-</div></div>
+                    <div class="metric"><div class="label">Token</div><div class="value" id="rs-month-tokens">-</div><div class="sub" id="rs-month-token-detail">-</div></div>
+                    <div class="metric"><div class="label">业务缓存</div><div class="value" id="rs-month-cache">-</div></div>
+                    <div class="metric"><div class="label">费用</div><div class="value" id="rs-month-cost">-</div></div>
+                    <div class="metric"><div class="label">平均延迟</div><div class="value" id="rs-month-latency">-</div></div>
+                </div>
+                <div class="resource-bars" id="rs-month-bars"><div class="resource-empty">暂无数据</div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel">
         <h2>最近会话明细</h2>
         <div class="session-table-wrap">
             <table class="table-lite">
                 <thead>
                 <tr>
                     <th>Session</th>
-                    <th>用户 / 设备</th>
+                    <th>用户 / 设备 / 位置</th>
                     <th>状态</th>
                     <th>App</th>
                     <th>OpenAI</th>
@@ -302,6 +370,8 @@
 const $ = id => document.getElementById(id);
 let autoTimer = null;
 
+// 诊断页同时拉取健康检查、debug/status、Redis key 和统一 stats。
+// 这些接口可能在生产安全配置下需要鉴权；页面只负责展示错误，不绕过服务端鉴权。
 document.addEventListener('DOMContentLoaded', () => {
     $('btn-refresh').addEventListener('click', refreshAll);
     $('auto-refresh').addEventListener('change', restartAutoRefresh);
@@ -309,6 +379,8 @@ document.addEventListener('DOMContentLoaded', () => {
     restartAutoRefresh();
 });
 
+// restartAutoRefresh 控制轮询间隔。
+// 轮询只用于调试看板，不能替代服务端告警和日志审计。
 function restartAutoRefresh() {
     if (autoTimer) clearInterval(autoTimer);
     const seconds = Number($('auto-refresh').value);
@@ -317,21 +389,27 @@ function restartAutoRefresh() {
     }
 }
 
+// refreshAll 聚合多个诊断接口的快照。
+// 单个接口失败不会阻断其他面板渲染，失败信息会写入 raw-json 便于定位是哪一层不可用。
 async function refreshAll() {
     setBadge('refresh-status', '刷新中', 'warn');
-    const result = { debug: null, health: null, redis: null };
+    const result = { debug: null, health: null, redis: null, statsResources: null };
     await Promise.all([
         fetchJSON('/api/debug/status').then(v => result.debug = v).catch(err => result.debug = { error: err.message }),
         fetchJSON('/health').then(v => result.health = v).catch(err => result.health = { error: err.message }),
-        fetchJSON('/api/redis/keys?pattern=*&count=1000&full=1').then(v => result.redis = v).catch(err => result.redis = { error: err.message })
+        fetchJSON('/api/redis/keys?pattern=*&count=1000&full=1').then(v => result.redis = v).catch(err => result.redis = { error: err.message }),
+        fetchJSON('/api/stats/resources').then(v => result.statsResources = v).catch(err => result.statsResources = { error: err.message })
     ]);
     renderDebug(result.debug, result.health);
+    renderResourceStats(result.statsResources);
     renderRedisKeys(result.redis);
     $('raw-json').textContent = JSON.stringify(result, null, 2);
     $('last-refresh').textContent = '最后刷新：' + new Date().toLocaleString();
     setBadge('refresh-status', '已刷新', 'ok');
 }
 
+// fetchJSON 是诊断页统一请求入口。
+// cache:no-store 避免浏览器缓存掩盖 Redis、容量和 metrics 的实时变化。
 async function fetchJSON(url) {
     const resp = await fetch(url, { cache: 'no-store' });
     const text = await resp.text();
@@ -343,11 +421,15 @@ async function fetchJSON(url) {
     return data;
 }
 
+// renderDebug 展示 /api/debug/status 和 /health 的服务端运行状态。
+// 字段来源包括 Go runtime、配置脱敏快照、Redis ping、OpenAI/Azure 配置和 metrics.Snapshot。
 function renderDebug(payload, health) {
     const data = payload?.data || {};
-    const server = data.server || {};
-    const memory = data.memory || {};
-    const capacity = data.capacity || {};
+    const monitor = data.monitor || {};
+    const server = monitor.server || data.server || {};
+    const memory = monitor.memory || data.memory || {};
+    const capacity = monitor.capacity || data.capacity || {};
+    const alerts = monitor.alerts || {};
     const features = data.features || {};
     const redis = data.redis || {};
     const network = data.network || {};
@@ -376,6 +458,9 @@ function renderDebug(payload, health) {
     text('m-sys', mb(memory.sys_mb));
     text('m-gc', number(memory.num_gc));
     text('m-gc-pause', `${ms(memory.gc_pause_total_ms)} 总暂停`);
+    text('m-alert-status', `${alerts.status || 'recovered'} / ${number(alerts.active_count)} active`);
+    text('m-alert-reasons', Array.isArray(alerts.active_reasons) && alerts.active_reasons.length > 0 ? alerts.active_reasons.join(' / ') : '暂无活跃过载告警');
+    text('m-alert-last-recovered', alerts.last_recovered_reason ? `${alerts.last_recovered_reason} ${alerts.last_recovered_at || ''}` : '-');
 
     renderSwitch('f-jwt', features.jwt_enabled);
     renderSwitch('f-rate', features.rate_limit_enabled);
@@ -465,7 +550,7 @@ function renderMetrics(metrics, server, memory, capacity) {
     text('mo-stream', `${number(openai.text_delta_chars)} 文本字符 / ${number(openai.transcript_delta_chars)} 转写字符 / ${byteSize(openai.audio_delta_bytes)} 音频`);
     text('mo-latency', `${latencyText(openai.first_delta_latency_ms)} / ${latencyText(openai.response_latency_ms)}`);
 
-    text('mb-tokens', `${number(business.input_tokens)} 输入 / ${number(business.output_tokens)} 输出 / ${number(business.total_tokens)} 总量`);
+    text('mb-tokens', `${number(business.input_tokens)} 输入 / ${number(business.output_tokens)} 输出 / ${number(business.total_tokens)} 总量 / ${number(business.cached_tokens)} 缓存命中 / ${number(business.reasoning_tokens)} 推理`);
     text('mb-token-maps', `用户 ${objectSize(business.tokens_by_user)} / 模型 ${objectSize(business.tokens_by_model)} / 日期 ${objectSize(business.tokens_by_day)}`);
     text('mb-audio', `${durationMs(business.input_audio_ms)} / ${durationMs(business.output_audio_ms)}`);
 
@@ -478,6 +563,75 @@ function renderMetrics(metrics, server, memory, capacity) {
     text('mi-ratio', active > 0 ? `${(goroutines / active).toFixed(2)} 协程/会话 / ${(allocMB / active).toFixed(2)} MB/会话` : `${number(goroutines)} 协程 / 暂无活跃会话`);
 
     renderRecentSessions(metrics.recent_sessions || []);
+}
+
+// renderResourceStats 展示 /api/stats/resources 中的统一资源统计。
+// day/week/month 当前仍是进程内聚合，不代表 Redis/DB 跨实例长期历史。
+function renderResourceStats(payload) {
+    const resources = payload?.data?.periods || {};
+    renderResourcePeriod('day', resources.day);
+    renderResourcePeriod('week', resources.week);
+    renderResourcePeriod('month', resources.month);
+}
+
+// renderResourcePeriod 渲染单个资源窗口的汇总。
+// cached/reasoning token 来自 Responses usage 解析，费用是模型配置里的单价估算。
+function renderResourcePeriod(period, data) {
+    const summary = data?.summary || {};
+    text(`rs-${period}-requests`, `${number(summary.requests)} / ${number(summary.failed_requests)}`);
+    text(`rs-${period}-ops`, resourceOpsText(summary));
+    text(`rs-${period}-tokens`, number(summary.total_tokens));
+    text(`rs-${period}-token-detail`, `cached ${number(summary.cached_tokens)} / reasoning ${number(summary.reasoning_tokens)}`);
+    text(`rs-${period}-cache`, `命中 ${number(summary.business_cache_hits)} / 未命中 ${number(summary.business_cache_misses)}`);
+    text(`rs-${period}-cost`, money(summary.total_cost));
+    text(`rs-${period}-latency`, ms(summary.avg_latency_ms));
+    renderResourceBars(`rs-${period}-bars`, data?.timeline || []);
+}
+
+function resourceOpsText(summary) {
+    const capacity = Number(summary.capacity_rejected || 0);
+    const rate = Number(summary.rate_limit_rejected || 0);
+    const errors = Number(summary.errors || 0);
+    const alerts = Number(summary.alerts_firing || 0);
+    const recovered = Number(summary.alerts_recovered || 0);
+    const workspace = Number(summary.workspace_write_confirmed || 0) +
+        Number(summary.workspace_write_rejected || 0) +
+        Number(summary.workspace_write_failed || 0);
+    return `容量拒绝 ${number(capacity)} / 限流 ${number(rate)} / 错误 ${number(errors)} / 告警 ${number(alerts)} / 恢复 ${number(recovered)} / 写入 ${number(workspace)}`;
+}
+
+// renderResourceBars 画最近 12 个时间桶的 token 条形图。
+// 条宽按当前窗口最大 token 归一化，最小 4% 保证低流量桶仍可见。
+function renderResourceBars(id, timeline) {
+    const box = $(id);
+    box.innerHTML = '';
+    if (!Array.isArray(timeline) || timeline.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'resource-empty';
+        empty.textContent = '暂无数据';
+        box.appendChild(empty);
+        return;
+    }
+    const rows = timeline.slice(-12);
+    const maxTokens = Math.max(1, ...rows.map(item => Number(item.total_tokens || 0)));
+    rows.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'resource-row';
+        const label = document.createElement('span');
+        label.textContent = item.label || '-';
+        const track = document.createElement('span');
+        track.className = 'resource-track';
+        const fill = document.createElement('span');
+        fill.className = 'resource-fill';
+        fill.style.width = `${Math.max(4, Number(item.total_tokens || 0) / maxTokens * 100)}%`;
+        track.appendChild(fill);
+        const value = document.createElement('span');
+        value.textContent = `${number(item.total_tokens)} tok`;
+        row.appendChild(label);
+        row.appendChild(track);
+        row.appendChild(value);
+        box.appendChild(row);
+    });
 }
 
 // 渲染最近会话明细，展示服务端真实 session.events 和 response 摘要。
@@ -497,7 +651,7 @@ function renderRecentSessions(sessions) {
     sessions.slice(0, 30).forEach(session => {
         const tr = document.createElement('tr');
         addCell(tr, `${session.session_id || '-'}\n${session.request_id || '-'}`, 'mono-cell');
-        addCell(tr, `${session.user_id || '-'}\n${session.device_id || '-'}\n${session.remote_addr || '-'}`, 'mono-cell');
+        addCell(tr, `${session.user_id || '-'} / ${session.user_name || '-'}\n设备 ${session.device_id || '-'}\n连接 ${session.remote_addr || '-'}\n真实IP ${session.real_ip || '-'}\n所在地 ${formatIPLocation(session.ip_location)}`, 'mono-cell');
         addCell(tr, `${session.active ? 'active' : 'closed'}\n${session.end_reason || '-'}\n${durationMs((session.duration_seconds || 0) * 1000)}`);
         addCell(tr, `${number(session.app_messages)} msg\n${byteSize(session.app_bytes_in)} in\n${byteSize(session.app_bytes_out)} out\npong ${ms(session.last_pong_latency_ms)}`);
         addCell(tr, `${number(session.openai_events_up)} up\n${number(session.openai_events_down)} down\nreconnect ${number(session.openai_reconnects)}`);
@@ -533,6 +687,18 @@ function summarizeResponses(responses) {
         const shortContent = content.length > 180 ? content.slice(0, 180) + '...' : content;
         return `${resp.response_id || '-'} ${resp.status || '-'} ${ms(resp.duration_ms)}\n${shortContent || `audio ${byteSize(resp.audio_bytes)} / packets ${number(resp.audio_packets)}`}`;
     }).join('\n\n');
+}
+
+// formatIPLocation 将后端 ip_location 结构转换成人读文本。
+// 当前后端至少会返回本机/内网/公网/未知；配置 GeoIP 后可继续扩展为国家、省市等字段。
+function formatIPLocation(location) {
+    if (!location || typeof location !== 'object') return '-';
+    const parts = [];
+    if (location.display) parts.push(location.display);
+    if (location.country) parts.push(location.country);
+    if (location.region) parts.push(location.region);
+    if (location.city) parts.push(location.city);
+    return parts.length > 0 ? parts.join(' / ') : (location.status || '-');
 }
 
 function renderRedisKeys(payload) {
@@ -582,6 +748,10 @@ function text(id, value) { $(id).textContent = value == null || value === '' ? '
 function number(v) { return v == null || Number.isNaN(Number(v)) ? '-' : Number(v).toLocaleString(); }
 function mb(v) { return v == null ? '-' : `${Number(v).toFixed(1)} MB`; }
 function ms(v) { return v == null ? '-' : `${Number(v).toFixed(1)}ms`; }
+function money(v) {
+    const n = Number(v || 0);
+    return n === 0 ? '0.0000' : n.toFixed(4);
+}
 function byteSize(v) {
     const n = Number(v || 0);
     if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;

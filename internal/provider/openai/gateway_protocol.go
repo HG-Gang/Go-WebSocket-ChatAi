@@ -67,9 +67,9 @@ type gatewayClientContext struct {
 // gatewayAdapter 是旧 Events.php 与 SceneChatHandler 输入侧逻辑的 Go 替代实现。
 // 它同时接收 OpenAI 原生客户端事件，以及使用 msgType、content、historyContent 字段的 TOZO 旧 App 协议。
 type gatewayAdapter struct {
-	mu sync.Mutex
-	snapshot gatewaySessionSnapshot
-	context gatewayClientContext
+	mu          sync.Mutex
+	snapshot    gatewaySessionSnapshot
+	context     gatewayClientContext
 	lastMsgType string
 	// 当前会话是否已经向上游发送过任何 session.update（无论来自旧 msgType 流还是原生事件透传）。
 	// 一旦为 true，原生 OpenAI 事件分支不再自动 prepend session.update，避免覆盖用户手动配置。
@@ -481,13 +481,18 @@ func (g *gatewayAdapter) planRawOpenAIEvent(raw map[string]json.RawMessage, data
 func defaultTOZOInstructions() string {
 	return "You are TOZO AI Assistant. Answer in the user's language. Keep replies concise and natural for earbuds. " +
 		"For TOZO product questions, use the TOZO knowledge tool. For weather or forecast questions, use the weather tool only. " +
-		"For navigation, route, directions, or going somewhere, use navigation tools and do not call the weather tool."
+		"For navigation, route, directions, or going somewhere, use navigation tools and do not call the weather tool. " +
+		"When the user asks about the current project or asks you to change project files, use the workspace tools. " +
+		"Read files before editing them, keep changes focused, and report changed paths clearly."
 }
 
 func legacyToolsForMode(raw map[string]json.RawMessage, mode string) []any {
 	tools := []any{
 		openWeatherToolSchema(),
 		searchTOZOKnowledgeToolSchema(),
+		workspaceListFilesToolSchema(),
+		workspaceReadFileToolSchema(),
+		workspaceWriteFileToolSchema(),
 	}
 	if mode == gatewayMsgTextCommand {
 		tools = append(tools, mapCommandToolSchema())
@@ -555,6 +560,79 @@ func searchTOZOKnowledgeToolSchema() map[string]any {
 				},
 			},
 			"required":             []string{"query"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+func workspaceListFilesToolSchema() map[string]any {
+	return map[string]any{
+		"type":        "function",
+		"name":        "workspace_list_files",
+		"description": "List files and directories inside the selected local project. Paths must be project-relative.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"project_id": map[string]any{
+					"type":        "string",
+					"description": "Project id from the web workspace selector. Use current when omitted.",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Project-relative directory path. Use empty string for the project root.",
+				},
+			},
+			"required":             []string{},
+			"additionalProperties": false,
+		},
+	}
+}
+
+func workspaceReadFileToolSchema() map[string]any {
+	return map[string]any{
+		"type":        "function",
+		"name":        "workspace_read_file",
+		"description": "Read a UTF-8 text file inside the selected local project. Paths must be project-relative.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"project_id": map[string]any{
+					"type":        "string",
+					"description": "Project id from the web workspace selector. Use current when omitted.",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Project-relative file path to read.",
+				},
+			},
+			"required":             []string{"path"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+func workspaceWriteFileToolSchema() map[string]any {
+	return map[string]any{
+		"type":        "function",
+		"name":        "workspace_write_file",
+		"description": "Write a UTF-8 text file inside the selected local project. Read existing files before editing and keep changes focused.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"project_id": map[string]any{
+					"type":        "string",
+					"description": "Project id from the web workspace selector. Use current when omitted.",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Project-relative file path to write.",
+				},
+				"content": map[string]any{
+					"type":        "string",
+					"description": "Complete new file content.",
+				},
+			},
+			"required":             []string{"path", "content"},
 			"additionalProperties": false,
 		},
 	}
@@ -900,6 +978,16 @@ func responseCreateAudioWithInstructions(instructions string) ([]byte, error) {
 		"type": "response.create",
 		"response": map[string]any{
 			"output_modalities": []string{"audio"},
+			"instructions":      instructions,
+		},
+	})
+}
+
+func responseCreateTextWithInstructions(instructions string) ([]byte, error) {
+	return marshalJSON(map[string]any{
+		"type": "response.create",
+		"response": map[string]any{
+			"output_modalities": []string{"text"},
 			"instructions":      instructions,
 		},
 	})

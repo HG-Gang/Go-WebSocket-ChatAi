@@ -11,12 +11,27 @@ jwt:
   enabled: true
   secret: "dev-jwt-secret-for-local-testing-only" # 本地测试专用密钥
 
+security:
+  public_debug_enabled: true
+  public_token_enabled: true
+  allowed_origins:
+    - "http://127.0.0.1:8096"
+    - "http://localhost:8096"
+    - "http://127.0.0.1:8097"
+    - "http://localhost:8097"
+  trusted_proxies: []
+  allow_upstream_query_key: true
+  workspace_write_confirm: false
+  workspace_audit_retention_days: 30
+
 redis:
   addr: "127.0.0.1:6379"
   password: ""       # 本地 Redis 通常无密码
 
 logs:
   root_dir: "./logs"
+  retention_days: 30
+  cleanup_interval: "24h"
 
 # 开发环境下特殊调整
 rate_limit:

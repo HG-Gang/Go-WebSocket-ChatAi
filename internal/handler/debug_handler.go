@@ -2,9 +2,9 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -13,9 +13,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"TozoAI-Chat-Api/conf"
+	"TozoAI-Chat-Api/internal/logger"
 	"TozoAI-Chat-Api/internal/provider/azureai"
 	"TozoAI-Chat-Api/internal/provider/openairesponses"
-	"TozoAI-Chat-Api/internal/service/metrics"
+	"TozoAI-Chat-Api/internal/service/monitor"
 	redisService "TozoAI-Chat-Api/internal/service/redis"
 	"TozoAI-Chat-Api/internal/service/session"
 )
@@ -29,25 +30,34 @@ var debugProcessStartedAt = time.Now()
 //  2. 每次请求实时读取 Go runtime、会话容量、Redis 连接池和 OpenAI Realtime 配置。
 //  3. 页面可以高频轮询这个接口，所以这里不执行 SCAN 这类重操作；Redis key 明细仍由 /api/redis/keys 单独负责。
 func DebugStatusHandler(c *gin.Context) {
+	snapshot := monitor.Collect(debugProcessStartedAt)
+	monitor.LogSnapshotThrottled(snapshot, 30*time.Second)
+	snapshot.Log = monitor.LogState()
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"data": gin.H{
-			"server":    buildDebugServerStatus(),
-			"memory":    buildDebugMemoryStatus(),
-			"capacity":  buildDebugCapacityStatus(),
+			"server":    snapshot.Server,
+			"process":   snapshot.Process,
+			"memory":    snapshot.Memory,
+			"capacity":  snapshot.Capacity,
+			"monitor":   snapshot,
 			"features":  buildDebugFeatureStatus(),
 			"redis":     buildDebugRedisStatus(),
 			"network":   buildDebugNetworkStatus(),
 			"openai":    buildDebugOpenAIStatus(),
 			"responses": buildDebugResponsesStatus(),
 			"azure":     buildDebugAzureStatus(),
-			"metrics":   metrics.Snapshot(),
+			"metrics":   snapshot.Metrics,
 			"routes": []gin.H{
 				{"name": "health", "method": "GET", "path": "/health", "purpose": "基础存活检查与活跃会话数"},
 				{"name": "debug_status", "method": "GET", "path": "/api/debug/status", "purpose": "Go / Redis / OpenAI 配置与运行时诊断"},
 				{"name": "redis_keys", "method": "GET", "path": "/api/redis/keys?pattern=*&count=500", "purpose": "Redis key 明细与类型/TTL/值预览"},
 				{"name": "openai_responses_status", "method": "GET", "path": "/api/openai/responses/status", "purpose": "OpenAI Responses API 安全配置快照"},
 				{"name": "openai_responses", "method": "POST", "path": "/api/openai/responses", "purpose": "OpenAI Responses API HTTP 代理接口"},
+				{"name": "web_models", "method": "GET", "path": "/api/web/models", "purpose": "Web 聊天看板模型配置列表"},
+				{"name": "web_metrics", "method": "GET", "path": "/api/web/metrics", "purpose": "Web 聊天看板请求明细与图表数据"},
+				{"name": "stats_resources", "method": "GET", "path": "/api/stats/resources", "purpose": "day/week/month 统一资源统计"},
 				{"name": "azure_status", "method": "GET", "path": "/api/azure/status", "purpose": "Azure OpenAI 安全配置快照"},
 				{"name": "azure_realtime_ws", "method": "GET", "path": "/ws/realtime/azure", "purpose": "Azure OpenAI Realtime WebSocket 网关"},
 				{"name": "azure_chat", "method": "POST", "path": "/api/azure/chat/completions", "purpose": "Azure Chat Completions 代理接口"},
@@ -80,6 +90,26 @@ func buildDebugServerStatus() gin.H {
 		"arch":           runtime.GOARCH,
 		"num_cpu":        runtime.NumCPU(),
 		"goroutines":     runtime.NumGoroutine(),
+	}
+}
+
+func buildDebugProcessStatus() gin.H {
+	executable, _ := os.Executable()
+	workingDir, _ := os.Getwd()
+	return gin.H{
+		"pid":            os.Getpid(),
+		"ppid":           os.Getppid(),
+		"executable":     executable,
+		"working_dir":    workingDir,
+		"go_version":     runtime.Version(),
+		"os":             runtime.GOOS,
+		"arch":           runtime.GOARCH,
+		"num_cpu":        runtime.NumCPU(),
+		"goroutines":     runtime.NumGoroutine(),
+		"gomaxprocs":     runtime.GOMAXPROCS(0),
+		"started_at":     debugProcessStartedAt.Format(time.RFC3339),
+		"uptime":         time.Since(debugProcessStartedAt).Round(time.Second).String(),
+		"uptime_seconds": int64(time.Since(debugProcessStartedAt).Seconds()),
 	}
 }
 
@@ -263,8 +293,10 @@ func buildDebugOpenAIStatus() gin.H {
 		"model_key":               "openai",
 		"enabled":                 cfg.Enabled,
 		"default_model":           stringOrDefault(cfg.DefaultModel, "gpt-realtime"),
-		"instructions":            cfg.Instructions,
-		"endpoint":                cfg.Endpoint,
+		"instructions_configured": strings.TrimSpace(cfg.Instructions) != "",
+		"instructions_length":     len(strings.TrimSpace(cfg.Instructions)),
+		"instructions_hash":       shortConfigHash(cfg.Instructions),
+		"endpoint":                logger.SafeURLForDisplay(cfg.Endpoint),
 		"voice":                   cfg.Voice,
 		"api_key_configured":      strings.TrimSpace(cfg.APIKey) != "",
 		"api_key_masked":          maskAPIKey(cfg.APIKey),
@@ -273,7 +305,7 @@ func buildDebugOpenAIStatus() gin.H {
 		"rate_rps":                cfg.RateRPS,
 		"rate_burst":              cfg.RateBurst,
 		"max_session_ttl":         cfg.MaxSessionTTL,
-		"ws_url":                  stringOrDefault(cfg.Realtime.WsUrl, "wss://api.openai.com/v1/realtime"),
+		"ws_url":                  logger.SafeURLForDisplay(stringOrDefault(cfg.Realtime.WsUrl, "wss://api.openai.com/v1/realtime")),
 		"realtime": gin.H{
 			"name":                  cfg.Realtime.Name,
 			"reconnect_max_retries": intOrDefault(cfg.Realtime.ReconnectMaxRetries, 3),
@@ -312,8 +344,10 @@ func buildDebugAzureStatus() gin.H {
 		"model_key":               "azureai",
 		"enabled":                 cfg.Enabled,
 		"default_model":           cfg.DefaultModel,
-		"instructions":            cfg.Instructions,
-		"endpoint":                cfg.Endpoint,
+		"instructions_configured": strings.TrimSpace(cfg.Instructions) != "",
+		"instructions_length":     len(strings.TrimSpace(cfg.Instructions)),
+		"instructions_hash":       shortConfigHash(cfg.Instructions),
+		"endpoint":                logger.SafeURLForDisplay(cfg.Endpoint),
 		"voice":                   cfg.Voice,
 		"api_key_configured":      strings.TrimSpace(cfg.APIKey) != "",
 		"api_key_masked":          maskAPIKey(cfg.APIKey),
@@ -336,7 +370,7 @@ func buildDebugAzureStatus() gin.H {
 		"timeout_ms":              status["timeout_ms"],
 		"realtime": gin.H{
 			"name":                  cfg.Realtime.Name,
-			"ws_url":                cfg.Realtime.WsUrl,
+			"ws_url":                logger.SafeURLForDisplay(cfg.Realtime.WsUrl),
 			"reconnect_max_retries": intOrDefault(cfg.Realtime.ReconnectMaxRetries, 3),
 			"reconnect_delay":       durationOrDefault(cfg.Realtime.ReconnectDelay, time.Second),
 			"app_ping_interval":     durationOrDefault(cfg.Realtime.AppPingInterval, 30*time.Second),
@@ -407,18 +441,17 @@ func stringFromExtra(extra map[string]interface{}, key string) string {
 	return ""
 }
 
-func maskProxyURL(raw string) string {
-	if strings.TrimSpace(raw) == "" {
+func shortConfigHash(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return ""
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User == nil {
-		return raw
-	}
-	if username := parsed.User.Username(); username != "" {
-		parsed.User = url.UserPassword(username, "******")
-	}
-	return parsed.String()
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("sha256:%x", sum[:6])
+}
+
+func maskProxyURL(raw string) string {
+	return logger.SafeURLForDisplay(raw)
 }
 
 // maskAPIKey 用于 /api/debug/status 等只读诊断接口输出 API Key 的脱敏字符串。

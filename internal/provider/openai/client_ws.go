@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,7 @@ import (
 	"TozoAI-Chat-Api/internal/logger"
 	"TozoAI-Chat-Api/internal/service/billing"
 	"TozoAI-Chat-Api/internal/service/metrics"
+	"TozoAI-Chat-Api/internal/service/stats"
 	protocol "TozoAI-Chat-Api/pkg/protocol/openai"
 	"TozoAI-Chat-Api/pkg/response"
 )
@@ -173,22 +175,23 @@ func (s *replayState) snapshot() (session []byte, history [][]byte) {
 //   - OpenAI 重连请求由 recvPump 发给 openAIWritePump 执行，重连恢复写入不跨协程抢写
 //   - session 层不直接操作 appConn，避免并发写
 type Client struct {
-	providerName     string                // 当前 Provider 名称（openai/azureai），用于日志、计费和配置识别
-	cfg              *OpenAIConfig         // 配置（含心跳参数，从配置文件读取）
-	log              *zap.Logger           // 带 providerName 命名空间的日志
-	apiConn          *websocket.Conn       // Go→OpenAI WS 连接
-	connMu           sync.Mutex            // 保护 apiConn 指针替换；读协程读取指针时也经过它
-	reconnMu         sync.Mutex            // 串行化 OpenAI 重连，避免重复重建连接
-	appConn          *websocket.Conn       // App→Go WS 连接
-	sendChan         chan []byte           // readPump/recvPump → writePump → App
-	apiSendChan      chan openAIOutbound   // readPump/recvPump → openAIWritePump → OpenAI
-	apiReconnectChan chan reconnectRequest // recvPump → openAIWritePump，集中执行上游重连
-	retryCnt         int                   // 当前重连计数
-	replay           *replayState          // OpenAI 上游重连后的最小会话恢复状态
-	userID           string                // 当前业务用户，用于计费和链路观测
-	sessionID        string                // 当前业务会话，用于计费和链路观测
-	gateway          *gatewayAdapter
-	respGate         *openAIResponseGate
+	providerName        string                // 当前 Provider 名称（openai/azureai），用于日志、计费和配置识别
+	cfg                 *OpenAIConfig         // 配置（含心跳参数，从配置文件读取）
+	log                 *zap.Logger           // 带 providerName 命名空间的日志
+	apiConn             *websocket.Conn       // Go→OpenAI WS 连接
+	connMu              sync.Mutex            // 保护 apiConn 指针替换；读协程读取指针时也经过它
+	reconnMu            sync.Mutex            // 串行化 OpenAI 重连，避免重复重建连接
+	appConn             *websocket.Conn       // App→Go WS 连接
+	sendChan            chan []byte           // readPump/recvPump → writePump → App
+	apiSendChan         chan openAIOutbound   // readPump/recvPump → openAIWritePump → OpenAI
+	apiReconnectChan    chan reconnectRequest // recvPump → openAIWritePump，集中执行上游重连
+	retryCnt            int                   // 当前重连计数
+	replay              *replayState          // OpenAI 上游重连后的最小会话恢复状态
+	userID              string                // 当前业务用户，用于计费和链路观测
+	sessionID           string                // 当前业务会话，用于计费和链路观测
+	gateway             *gatewayAdapter
+	respGate            *openAIResponseGate
+	writeOpenAIPingFunc func() error // 测试注入点；生产环境为空时走真实 WebSocket Ping
 }
 
 // NewClient 创建客户端（实现 provider.Provider 接口）
@@ -268,7 +271,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			err := fmt.Errorf("解析 realtime.proxy_url 失败: %w", perr)
 			c.log.Error("无效的 realtime.proxy_url 配置",
 				zap.String("provider", c.Name()),
-				zap.String("proxy_url", configuredProxy),
+				zap.String("proxy_url", logger.SafeURLForDisplay(configuredProxy)),
 				zap.Error(perr))
 			metrics.OpenAIConnectResult(c.sessionID, err)
 			return err
@@ -279,13 +282,17 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.log.Info("正在连接 Realtime 上游",
 		zap.String("provider", c.Name()),
-		zap.String("url", fullURL),
+		zap.String("url", logger.SafeURLForDisplay(fullURL)),
 		zap.String("proxy_source", proxySource))
 	conn, _, err := dialer.DialContext(ctx, fullURL, header)
 	if err != nil {
-		c.log.Error("连接 Realtime 上游失败", zap.String("provider", c.Name()), zap.Error(err))
-		metrics.OpenAIConnectResult(c.sessionID, err)
-		return fmt.Errorf("connect %s realtime: %w", c.Name(), err)
+		safeErr := fmt.Errorf("connect %s realtime failed: url=%s error=%s", c.Name(), logger.SafeURLForDisplay(fullURL), logger.RedactField("content", err.Error()))
+		c.log.Error("连接 Realtime 上游失败",
+			zap.String("provider", c.Name()),
+			zap.String("url", logger.SafeURLForDisplay(fullURL)),
+			zap.String("error_summary", logger.RedactField("content", err.Error())))
+		metrics.OpenAIConnectResult(c.sessionID, safeErr)
+		return safeErr
 	}
 
 	conn.SetReadLimit(apiMaxMessageSize)
@@ -522,6 +529,10 @@ func (c *Client) openAIWritePump(ctx context.Context, cancel context.CancelFunc,
 		c.log.Debug("openAIWritePump 退出")
 	}()
 
+	apiPingInterval := c.cfg.GetApiPingInterval()
+	apiPingTicker := time.NewTicker(apiPingInterval)
+	defer apiPingTicker.Stop()
+
 	for {
 		select {
 		case outbound := <-c.apiSendChan:
@@ -531,7 +542,9 @@ func (c *Client) openAIWritePump(ctx context.Context, cancel context.CancelFunc,
 					zap.String("reason", outbound.reason),
 					zap.Error(err))
 				metrics.OpenAIWriteError(c.sessionID, outbound.eventType, outbound.reason, err)
-				c.forwardToApp(response.NewResponse(500, response.EventReconnectRequired, "OpenAI write failed"))
+				if sendErr := c.forwardToApp(response.NewResponse(500, response.EventReconnectRequired, "OpenAI write failed")); sendErr != nil {
+					c.log.Warn("OpenAI 写失败通知无法送达 App", zap.Error(sendErr))
+				}
 				return
 			}
 
@@ -547,6 +560,18 @@ func (c *Client) openAIWritePump(ctx context.Context, cancel context.CancelFunc,
 				c.log.Error("OpenAI 重连失败", zap.String("reason", req.reason), zap.Error(err))
 				return
 			}
+
+		case <-apiPingTicker.C:
+			if err := c.writeOpenAIPing(); err != nil {
+				metrics.OpenAIPingFailed(c.sessionID, err)
+				c.log.Warn("发送 Ping 给 OpenAI 失败", zap.Duration("interval", apiPingInterval), zap.Error(err))
+				if sendErr := c.forwardToApp(response.NewResponse(500, response.EventReconnectRequired, "OpenAI ping failed")); sendErr != nil {
+					c.log.Warn("OpenAI ping 失败通知无法送达 App", zap.Error(sendErr))
+				}
+				return
+			}
+			metrics.OpenAIPingSent(c.sessionID)
+			c.log.Debug("已发送 Ping 给 OpenAI", zap.Duration("interval", apiPingInterval))
 
 		case <-ctx.Done():
 			return
@@ -851,16 +876,15 @@ func (c *Client) handleOpenAIMessageGateway(data []byte) {
 			c.enqueueCancelAfterCreated(v.Response.ID, reason)
 		}
 	case *protocol.ResponseDoneEvent:
-		inputTokens, outputTokens := 0, 0
+		usage := metricsUsageFromProtocol(v.Response.Usage)
 		if v.Response.Usage != nil && c.sessionID != "" {
-			inputTokens = v.Response.Usage.InputTokens
-			outputTokens = v.Response.Usage.OutputTokens
 			if err := billing.RecordTokenUsageDetail(c.Name(), c.sessionID, c.userID, billingDetailFromUsage(v.Response.ID, v.Response.Usage)); err != nil {
 				metrics.BillingError(c.sessionID, err)
 				c.log.Warn("record OpenAI token usage failed", zap.Error(err))
 			}
 		}
-		metrics.OpenAIResponseDone(c.sessionID, v.Response.ID, string(v.Response.Status), inputTokens, outputTokens)
+		metrics.OpenAIResponseDoneUsage(c.sessionID, v.Response.ID, string(v.Response.Status), usage)
+		c.recordRealtimeUsageStats(string(v.Response.Status), usage)
 		switch v.Response.Status {
 		case protocol.ResponseStatusCancelled:
 			stdResp = response.NewResponseWithID(0, gatewayResponseStopSuccess, v.Response.ID, "", time.Now().UnixMilli())
@@ -898,7 +922,9 @@ func (c *Client) handleOpenAIMessageGateway(data []byte) {
 	case *protocol.ErrorEvent:
 		metrics.OpenAIError(c.sessionID, v.Error.Code, v.Error.Message)
 		stdResp = response.NewResponseWithID(500, response.EventError, "", v.Error, time.Now().UnixMilli())
-		c.log.Warn("OpenAI error event", zap.String("code", v.Error.Code), zap.String("message", v.Error.Message))
+		c.log.Warn("OpenAI error event",
+			zap.String("code", v.Error.Code),
+			zap.String("message", logger.RedactField("content", v.Error.Message)))
 		if c.respGate.takeCancelUnknownActive() {
 			c.enqueueCancelAfterCreated("", "conversation_already_has_active_response")
 		}
@@ -976,6 +1002,8 @@ func (c *Client) handleFunctionCallArgumentsDone(evt *protocol.ResponseFunctionC
 		return c.handleKnowledgeFunctionCall(evt, args)
 	case "get_specify_route_navigation", "get_nearby_route_navigation":
 		return c.handleNavigationFunctionCall(evt, args)
+	case "workspace_list_files", "workspace_read_file", "workspace_write_file":
+		return c.handleWorkspaceFunctionCall(evt, args)
 	}
 
 	return response.NewResponseWithID(0, gatewayResponseCommandApp, evt.ResponseID, map[string]any{
@@ -1003,17 +1031,23 @@ func (c *Client) handleNavigationFunctionCall(evt *protocol.ResponseFunctionCall
 	return c.applyFunctionToolResult(evt, c.executeNavigationFunctionTool(ctx, evt, args))
 }
 
+func (c *Client) handleWorkspaceFunctionCall(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, args map[string]any) *response.StandardResponse {
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GetToolTimeout())
+	defer cancel()
+	return c.applyFunctionToolResult(evt, c.executeWorkspaceFunctionTool(ctx, evt, args))
+}
+
 func (c *Client) applyFunctionToolResult(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, result realtimeToolResult) *response.StandardResponse {
 	if result.cancelActive {
 		_ = c.cancelActiveFunctionResponse(evt.ResponseID, result.cancelReason)
 	}
 	if result.continueResponse && result.output != nil {
-		c.sendFunctionOutputAndCreate(evt, result.output, result.reason)
+		c.sendFunctionOutputAndCreate(evt, result.output, result.reason, result.textResponse)
 	}
 	return result.appResponse
 }
 
-func (c *Client) sendFunctionOutputAndCreate(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, output map[string]any, reason string) {
+func (c *Client) sendFunctionOutputAndCreate(evt *protocol.ResponseFunctionCallArgumentsDoneEvent, output map[string]any, reason string, textResponse bool) {
 	outputJSON, err := json.Marshal(output)
 	if err != nil {
 		c.log.Warn("序列化函数调用输出失败", zap.String("function", evt.Name), zap.Error(err))
@@ -1035,7 +1069,12 @@ func (c *Client) sendFunctionOutputAndCreate(evt *protocol.ResponseFunctionCallA
 		c.log.Warn("发送函数调用输出失败", zap.String("function", evt.Name), zap.Error(err))
 		return
 	}
-	create, err := responseCreateAudioWithInstructions("Use the function output to answer the user briefly. If the output reports a missing backend provider, explain that the service is temporarily unavailable.")
+	var create []byte
+	if textResponse {
+		create, err = responseCreateTextWithInstructions("Use the workspace tool output to answer in the user's language. If a file was changed, mention the changed path. Keep the answer concise.")
+	} else {
+		create, err = responseCreateAudioWithInstructions("Use the function output to answer the user briefly. If the output reports a missing backend provider, explain that the service is temporarily unavailable.")
+	}
 	if err != nil {
 		c.log.Warn("构造函数调用后续 response.create 失败", zap.String("function", evt.Name), zap.Error(err))
 		return
@@ -1120,6 +1159,39 @@ func billingDetailFromUsage(responseID string, usage *protocol.Usage) billing.To
 	return detail
 }
 
+func metricsUsageFromProtocol(usage *protocol.Usage) metrics.ResponseTokenUsage {
+	if usage == nil {
+		return metrics.ResponseTokenUsage{}
+	}
+	detail := billingDetailFromUsage("", usage)
+	return metrics.ResponseTokenUsage{
+		InputTokens:     detail.InputTokens,
+		OutputTokens:    detail.OutputTokens,
+		TotalTokens:     detail.TotalTokens,
+		CachedTokens:    detail.CachedTokens,
+		ReasoningTokens: detail.ReasoningTokens,
+	}
+}
+
+func (c *Client) recordRealtimeUsageStats(status string, usage metrics.ResponseTokenUsage) {
+	model := ""
+	if c.cfg != nil {
+		model = c.cfg.GetDefaultModel()
+	}
+	stats.RecordUsage(stats.UsageRecord{
+		Source:          stats.SourceRealtime,
+		Provider:        c.Name(),
+		Model:           model,
+		UserID:          c.userID,
+		Status:          status,
+		InputTokens:     int64(usage.InputTokens),
+		OutputTokens:    int64(usage.OutputTokens),
+		CachedTokens:    int64(usage.CachedTokens),
+		ReasoningTokens: int64(usage.ReasoningTokens),
+		TotalTokens:     int64(usage.TotalTokens),
+	})
+}
+
 // extractResponseID 从 OpenAI 流式服务端事件中提取 response_id。
 func (c *Client) extractResponseID(evt protocol.ServerEvent) string {
 	switch v := evt.(type) {
@@ -1140,32 +1212,106 @@ func (c *Client) extractResponseID(evt protocol.ServerEvent) string {
 
 // ======================== 工具方法 ========================
 
-// safeSend 安全写入 sendChan。下行队列满说明 App/耳机消费慢于 OpenAI 输出，
-// 这里短暂等待以吸收瞬时抖动；超过阈值仍然丢弃，避免一个慢客户端拖死上游读取协程。
-func (c *Client) safeSend(data []byte) bool {
+type appEventPolicy struct {
+	eventType string
+	critical  bool
+}
+
+// sendAppEvent 按事件重要性写入 App 下行队列。
+// 普通流式 delta 可按 best-effort 丢弃，避免慢客户端阻塞 OpenAI 读协程；
+// 错误、重连、结束和工具结果属于关键事件，队列超时时必须返回错误并写入指标。
+func (c *Client) sendAppEvent(data []byte, policy appEventPolicy) error {
 	metrics.QueueDepth(c.sessionID, len(c.sendChan), cap(c.sendChan), len(c.apiSendChan), cap(c.apiSendChan))
 	select {
 	case c.sendChan <- data:
 		metrics.QueueDepth(c.sessionID, len(c.sendChan), cap(c.sendChan), len(c.apiSendChan), cap(c.apiSendChan))
-		return true
+		return nil
 	case <-time.After(c.cfg.GetSendQueueTimeout()):
+		if policy.critical {
+			c.log.Warn("关键 App 下行事件队列超时",
+				zap.String("event_type", policy.eventType),
+				zap.Int("data_len", len(data)),
+				zap.Int("chan_cap", cap(c.sendChan)),
+				zap.Duration("waited", c.cfg.GetSendQueueTimeout()))
+			metrics.CriticalAppEventQueueTimeout(c.sessionID, policy.eventType, len(data))
+			return fmt.Errorf("critical app event queue timeout: event_type=%s bytes=%d", policy.eventType, len(data))
+		}
 		c.log.Warn("sendChan 已满，丢弃消息",
+			zap.String("event_type", policy.eventType),
 			zap.Int("data_len", len(data)),
 			zap.Int("chan_cap", cap(c.sendChan)),
 			zap.Duration("waited", c.cfg.GetSendQueueTimeout()))
 		metrics.SlowConsumerDrop(c.sessionID, len(data))
+		return nil
+	}
+}
+
+// safeSend 保留给无法解析事件类型的透传消息；它们默认按 best-effort 处理。
+func (c *Client) safeSend(data []byte) bool {
+	return c.sendAppEvent(data, appEventPolicy{eventType: "raw", critical: false}) == nil
+}
+
+// forwardToApp 将 StandardResponse 发送给 App。
+func (c *Client) forwardToApp(resp *response.StandardResponse) error {
+	data, err := resp.ToJSON()
+	if err != nil {
+		c.log.Error("序列化 forwardToApp 失败", zap.Error(err))
+		return err
+	}
+	return c.sendAppEvent(data, appEventPolicyFromStandardResponse(resp))
+}
+
+func appEventPolicyFromStandardResponse(resp *response.StandardResponse) appEventPolicy {
+	if resp == nil {
+		return appEventPolicy{eventType: "unknown", critical: false}
+	}
+	return appEventPolicy{
+		eventType: string(resp.Response),
+		critical:  isCriticalAppResponse(resp.Response),
+	}
+}
+
+func appEventPolicyFromResponse(raw map[string]json.RawMessage) appEventPolicy {
+	eventType := rawString(raw, "response")
+	if eventType == "" {
+		eventType = rawString(raw, "type")
+	}
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	return appEventPolicy{
+		eventType: eventType,
+		critical:  isCriticalAppResponse(response.ResponseEvent(eventType)),
+	}
+}
+
+func isCriticalAppResponse(event response.ResponseEvent) bool {
+	switch event {
+	case response.EventReconnectRequired,
+		response.EventError,
+		response.EventEnd,
+		response.EventSessionCreated,
+		response.EventSessionUpdated,
+		response.EventSessionRestored,
+		response.ResponseEvent("workspace_tool"):
+		return true
+	default:
 		return false
 	}
 }
 
-// forwardToApp 将 StandardResponse 发送给 App
-func (c *Client) forwardToApp(resp *response.StandardResponse) {
-	data, err := resp.ToJSON()
-	if err != nil {
-		c.log.Error("序列化 forwardToApp 失败", zap.Error(err))
-		return
+func (c *Client) writeOpenAIPing() error {
+	if c.writeOpenAIPingFunc != nil {
+		return c.writeOpenAIPingFunc()
 	}
-	c.safeSend(data)
+
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.apiConn == nil {
+		return fmt.Errorf("openai connection is nil")
+	}
+	deadline := time.Now().Add(c.cfg.GetApiWriteTimeout())
+	return c.apiConn.WriteControl(websocket.PingMessage, nil, deadline)
 }
 
 func classifyAppMessage(messageType int, data []byte) string {

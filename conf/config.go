@@ -6,6 +6,8 @@ package conf
 
 import (
 	"sync"
+
+	"TozoAI-Chat-Api/internal/service/stats"
 )
 
 // Global 全局配置单例（通过 loader.go 加载配置后初始化）
@@ -75,6 +77,16 @@ type GlobalConfig struct {
 		ExpireHours int    `mapstructure:"expire_hours"` // 令牌有效期（单位：小时）
 	} `mapstructure:"jwt"`
 
+	Security struct {
+		PublicDebugEnabled      bool     `mapstructure:"public_debug_enabled"`
+		PublicTokenEnabled      bool     `mapstructure:"public_token_enabled"`
+		AllowedOrigins          []string `mapstructure:"allowed_origins"`
+		TrustedProxies          []string `mapstructure:"trusted_proxies"`
+		AllowUpstreamQueryKey   bool     `mapstructure:"allow_upstream_query_key"`
+		WorkspaceWriteConfirm   bool     `mapstructure:"workspace_write_confirm"`
+		WorkspaceAuditRetention int      `mapstructure:"workspace_audit_retention_days"`
+	} `mapstructure:"security"`
+
 	// Redis 缓存与限流配置
 	Redis struct {
 		Enabled      bool   `mapstructure:"enabled"`        // 是否启用 Redis 功能
@@ -87,7 +99,9 @@ type GlobalConfig struct {
 
 	// Logs 日志存储配置
 	Logs struct {
-		RootDir string `mapstructure:"root_dir"` // 日志存储根路径（如 "./logs"）
+		RootDir         string `mapstructure:"root_dir"`         // 日志存储根路径（如 "./logs"）
+		RetentionDays   int    `mapstructure:"retention_days"`   // 日志保留天数，超过该天数的按天日志会被后台清理
+		CleanupInterval string `mapstructure:"cleanup_interval"` // 日志清理调度间隔（如 "24h"）
 	} `mapstructure:"logs"`
 
 	// DB 数据库基础配置（预留）
@@ -114,6 +128,18 @@ type GlobalConfig struct {
 		MaxActiveSessions int64 `mapstructure:"max_active_sessions"` // 单实例最大活跃 WS 会话数；0 表示不限制
 	} `mapstructure:"capacity"`
 
+	Alerts struct {
+		DingTalk struct {
+			Enabled         bool     `mapstructure:"enabled"`          // 是否启用钉钉机器人告警
+			Webhook         string   `mapstructure:"webhook"`          // 钉钉机器人 Webhook 地址，建议用环境变量注入
+			Secret          string   `mapstructure:"secret"`           // 钉钉加签密钥，可选
+			CooldownSeconds int      `mapstructure:"cooldown_seconds"` // 同类告警冷却秒数，避免过载时刷屏
+			TimeoutMs       int      `mapstructure:"timeout_ms"`       // 发送超时毫秒数
+			AtMobiles       []string `mapstructure:"at_mobiles"`       // 需要 @ 的手机号列表
+			IsAtAll         bool     `mapstructure:"is_at_all"`        // 是否 @ 所有人
+		} `mapstructure:"dingtalk"`
+	} `mapstructure:"alerts"`
+
 	// Models 模型配置字典（Key 为模型标识，Value 为具体配置）
 	Models map[string]ModelConfig `mapstructure:"models"`
 }
@@ -128,18 +154,39 @@ var (
 // 如果请求的模型不存在，将返回一个空的 ModelConfig 结构体指针，防止调用方出现空指针异常（Panic）。
 func GetModel(modelName string) *ModelConfig {
 	modelConfigMu.RLock()
-	defer modelConfigMu.RUnlock()
-
 	if modelConfigCache == nil {
+		modelConfigMu.RUnlock()
+		recordModelConfigCacheStat(false, modelName)
 		return &ModelConfig{}
 	}
 
 	cfg, ok := modelConfigCache[modelName]
+	modelConfigMu.RUnlock()
 	if !ok {
+		recordModelConfigCacheStat(false, modelName)
 		return &ModelConfig{}
 	}
 
+	recordModelConfigCacheStat(true, modelName)
 	return cfg
+}
+
+// recordModelConfigCacheStat 将模型配置缓存读取写入统一 stats。
+// 这里记录的是业务配置缓存命中/未命中，和 Redis 连接池 hits/misses 是两套口径。
+func recordModelConfigCacheStat(hit bool, modelName string) {
+	kind := stats.ResourceKindBusinessCacheMiss
+	status := "miss"
+	if hit {
+		kind = stats.ResourceKindBusinessCacheHit
+		status = "hit"
+	}
+	stats.RecordResourceEvent(stats.ResourceEvent{
+		Source:   stats.SourceSystem,
+		Kind:     kind,
+		Provider: "model_config_cache",
+		Model:    modelName,
+		Status:   status,
+	})
 }
 
 // GetModelConfig 为 GetModel 的别名，用于兼容旧版本的调用习惯。

@@ -18,7 +18,9 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,10 +40,12 @@ import (
 type Session struct {
 	ID         string            // 会话唯一ID（UUID V7）
 	UserID     string            // 用户ID（JWT解析得到）
+	UserName   string            // 用户名称（JWT解析得到，可为空）
 	DeviceID   string            // App/耳机侧上报的设备ID（可选，用于排查单设备断链）
 	RequestID  string            // 本次连接的全局唯一请求ID（贯穿全链路日志）
 	Model      string            // 模型名称（openai/azureai）
 	RemoteAddr string            // App 连接来源地址
+	IPLocation map[string]string // 反向代理/CDN 提供的粗粒度所在地（仅用于监控展示）
 	UserAgent  string            // App/调试页面 User-Agent
 	StartTime  time.Time         // 会话开始时间
 	AppConn    *websocket.Conn   // 与App的WS连接
@@ -59,7 +63,7 @@ type Session struct {
 //   - remoteAddr/userAgent/deviceID: 连接来源元数据，只用于日志、Redis 和调试指标
 //   - appConn: 与App的WS连接
 //   - prov: 模型Provider实例
-func NewSession(userID, model, requestID, remoteAddr, userAgent, deviceID string, appConn *websocket.Conn, prov provider.Provider) *Session {
+func NewSession(userID, userName, model, requestID, remoteAddr, userAgent, deviceID string, appConn *websocket.Conn, prov provider.Provider) *Session {
 	// 生成会话ID（优先UUID V7，降级UUID V4）
 	var sessionID string
 	uuidV7, err := uuid.NewV7()
@@ -75,11 +79,13 @@ func NewSession(userID, model, requestID, remoteAddr, userAgent, deviceID string
 		zap.String("request_id", requestID),
 		zap.String("session_id", sessionID),
 		zap.String("user_id", userID),
+		zap.String("user_name", userName),
 	)
 
 	return &Session{
 		ID:         sessionID,
 		UserID:     userID,
+		UserName:   userName,
 		DeviceID:   deviceID,
 		RequestID:  requestID,
 		Model:      model,
@@ -89,6 +95,22 @@ func NewSession(userID, model, requestID, remoteAddr, userAgent, deviceID string
 		AppConn:    appConn,
 		Provider:   prov,
 		log:        log,
+	}
+}
+
+// SetClientLocation 设置请求入口解析出的所在地信息。
+// 该信息只用于监控与日志排障，不参与鉴权或安全策略。
+func (s *Session) SetClientLocation(location map[string]string) {
+	if s == nil || len(location) == 0 {
+		return
+	}
+	s.IPLocation = make(map[string]string, len(location))
+	for key, value := range location {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			s.IPLocation[key] = value
+		}
 	}
 }
 
@@ -104,7 +126,7 @@ func (s *Session) Start(ctx context.Context) {
 	if remoteAddr == "" && s.AppConn != nil && s.AppConn.RemoteAddr() != nil {
 		remoteAddr = s.AppConn.RemoteAddr().String()
 	}
-	metrics.SessionStarted(s.ID, s.RequestID, s.UserID, s.DeviceID, s.Model, remoteAddr, s.UserAgent)
+	metrics.SessionStartedWithLocation(s.ID, s.RequestID, s.UserID, s.UserName, s.DeviceID, s.Model, remoteAddr, s.UserAgent, s.IPLocation)
 
 	// 1. 记录会话元数据到Redis（使用 HSetMap 支持 map 批量写入）
 	redisKey := fmt.Sprintf("session:%s", s.ID)
@@ -112,10 +134,12 @@ func (s *Session) Start(ctx context.Context) {
 	ttl := time.Duration(modelCfg.MaxSessionTTL) * time.Second
 	_ = redis.HSetMap(s.Model, redisKey, map[string]interface{}{
 		"user_id":     s.UserID,
+		"user_name":   s.UserName,
 		"device_id":   s.DeviceID,
 		"request_id":  s.RequestID,
 		"model":       s.Model,
 		"remote_addr": remoteAddr,
+		"ip_location": formatClientLocationForRedis(s.IPLocation),
 		"user_agent":  s.UserAgent,
 		"start_time":  s.StartTime.Unix(),
 		"status":      "active",
@@ -140,6 +164,17 @@ func (s *Session) Start(ctx context.Context) {
 	metrics.SessionEnded(s.ID, "provider_return", time.Since(s.StartTime))
 	s.log.Info("会话正常结束",
 		zap.Float64("duration_seconds", time.Since(s.StartTime).Seconds()))
+}
+
+func formatClientLocationForRedis(location map[string]string) string {
+	if len(location) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(location)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // Close 优雅关闭会话

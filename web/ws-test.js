@@ -63,6 +63,9 @@ const dom = {
     wsUrl:             () => document.getElementById('ws-url'),
     token:             () => document.getElementById('token'),
     tokenApi:          () => document.getElementById('token-api'),
+    upstreamWsUrl:     () => document.getElementById('upstream-ws-url'),
+    upstreamApiKey:    () => document.getElementById('upstream-api-key'),
+    upstreamModel:     () => document.getElementById('upstream-model'),
     btnConnect:        () => document.getElementById('btn-connect'),
     btnDisconnect:     () => document.getElementById('btn-disconnect'),
     btnReconnect:      () => document.getElementById('btn-reconnect'),
@@ -377,12 +380,24 @@ async function connect() {
     }
 
     const wsUrl = dom.wsUrl().value;
-    // 将 Token 附加到 URL 参数（因为浏览器 WebSocket API 不支持自定义 Header）
-    // Go 服务端的 Auth 中间件需要从 URL 参数中提取 Token
+    const query = new URLSearchParams();
+    query.set('token', state.token);
+
+    const upstreamWsUrl = dom.upstreamWsUrl()?.value.trim();
+    const upstreamApiKey = dom.upstreamApiKey()?.value.trim();
+    const upstreamModel = dom.upstreamModel()?.value.trim();
+    if (upstreamWsUrl) query.set('upstream_ws_url', upstreamWsUrl);
+    if (upstreamApiKey) query.set('upstream_api_key', upstreamApiKey);
+    if (upstreamModel) query.set('upstream_model', upstreamModel);
+
+    // 将 Token 和可选上游配置附加到本地 WS URL；浏览器 WebSocket API 不支持自定义 Header。
     const separator = wsUrl.includes('?') ? '&' : '?';
-    const fullUrl = `${wsUrl}${separator}token=${encodeURIComponent(state.token)}`;
+    const fullUrl = `${wsUrl}${separator}${query.toString()}`;
 
     log('info', '连接', `正在连接 ${wsUrl}...`);
+    if (upstreamWsUrl) {
+        log('info', '连接', `使用页面填写的上游 Realtime URL：${upstreamWsUrl}`);
+    }
     updateConnStatus('connecting', '连接中...');
 
     try {
@@ -1327,17 +1342,20 @@ function setText(el, value) {
 }
 
 function initTheme() {
-    const saved = localStorage.getItem('tozo-ws-theme') || 'dark';
+    const saved = window.TozoTheme?.getTheme?.() || localStorage.getItem('tozo-ws-theme') || 'dark';
     dom.themeSelect().value = saved;
-    applyTheme(saved);
+    applyTheme(saved, false);
 }
 
-function applyTheme(theme) {
-    document.body.classList.remove('theme-dark', 'theme-light', 'theme-ocean', 'theme-sepia', 'theme-contrast');
-    if (theme && theme !== 'dark') {
-        document.body.classList.add(`theme-${theme}`);
+function applyTheme(theme, persist = true) {
+    if (window.TozoTheme?.applyTheme) {
+        window.TozoTheme.applyTheme(theme, { persist });
+        return;
     }
-    localStorage.setItem('tozo-ws-theme', theme || 'dark');
+    const selected = theme || 'dark';
+    document.body.classList.remove('theme-dark', 'theme-light', 'theme-ocean', 'theme-sepia', 'theme-contrast');
+    document.body.classList.add(`theme-${selected}`);
+    if (persist) localStorage.setItem('tozo-ws-theme', selected);
 }
 
 function formatBytes(value) {
@@ -1635,9 +1653,11 @@ function renderServiceConfig() {
     setText(dom.svcCfgRestore(), rt.restore_session ? 'ON' : 'OFF');
     setText(dom.svcCfgRestoreLimit(), rt.restore_history_limit ?? '-');
 
-    // instructions
-    const instr = (modelData.instructions || '').trim();
-    dom.svcCfgInstructions().textContent = instr ? (instr.length > 200 ? instr.slice(0, 200) + '...' : instr) : '（未配置）';
+    // instructions 可能包含内部系统提示词，只展示安全摘要，不在浏览器暴露原文。
+    const configured = Boolean(modelData.instructions_configured);
+    const length = modelData.instructions_length ?? 0;
+    const hash = modelData.instructions_hash || '-';
+    dom.svcCfgInstructions().textContent = configured ? `已配置，长度=${length}，${hash}` : '（未配置）';
 
     // Azure extra fields
     const extra1 = dom.svcCfgExtraCard1();

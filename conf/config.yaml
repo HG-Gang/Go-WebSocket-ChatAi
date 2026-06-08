@@ -7,7 +7,7 @@ env: dev
 
 # 服务监听配置
 server:
-  addr: ":8096"      # 服务监听的本地地址和端口
+  addr: ":8097"      # 服务监听的本地地址和端口
   mode: debug        # 运行模式：debug（调试）, release（生产）, test（测试）
 
 # JWT 身份鉴权配置
@@ -16,6 +16,19 @@ jwt:
   secret: "dev-jwt-secret-key-32chars-minimum-for-local" # 签名密钥（生产环境应使用复杂随机字符串）
   issuer: "TozoAI"   # 签发者标识
   expire_hours: 24   # 令牌过期时间（小时）
+
+security:
+  public_debug_enabled: true
+  public_token_enabled: true
+  allowed_origins:
+    - "http://127.0.0.1:8096"
+    - "http://localhost:8096"
+    - "http://127.0.0.1:8097"
+    - "http://localhost:8097"
+  trusted_proxies: []
+  allow_upstream_query_key: true
+  workspace_write_confirm: false
+  workspace_audit_retention_days: 30
 
 # Redis 存储配置（用于缓存、会话管理和限流计数）
 redis:
@@ -28,7 +41,9 @@ redis:
 
 # 日志存储配置
 logs:
-  root_dir: "./logs"  # 日志文件的存储根目录
+  root_dir: "./logs"        # 日志文件的存储根目录
+  retention_days: 30        # 开发和默认环境保留最近 30 天按天日志
+  cleanup_interval: "24h"   # 后台日志清理任务运行间隔
 
 # 数据库配置（暂作为预留项）
 db:
@@ -46,6 +61,17 @@ billing:
 capacity:
   max_active_sessions: 100000     # 单实例最大活跃 WS 会话数；百万并发通过多实例水平扩展达成
 
+# 系统告警配置
+alerts:
+  dingtalk:
+    enabled: false                 # 是否启用钉钉机器人过载告警；生产启用前必须配置 webhook
+    webhook: ""                    # 钉钉机器人 Webhook，建议用 Secret/环境变量注入
+    secret: ""                     # 钉钉机器人加签密钥，可选
+    cooldown_seconds: 300          # 同类过载告警冷却时间，避免高峰期刷屏
+    timeout_ms: 3000               # 调用钉钉 Webhook 的超时时间
+    at_mobiles: []                 # 需要 @ 的手机号列表
+    is_at_all: false               # 是否 @ 所有人
+
 # 模型配置中心
 # 定义系统中支持的 AI 模型及其各自的参数
 models:
@@ -53,7 +79,7 @@ models:
   openai:
     enabled: true                     # 启用状态
     api_key: "${OPENAI_API_KEY}"       # 授权密钥（从环境变量注入，本地调试可临时替换）
-    endpoint: "https://api.openai.com/v1" # API 基础端点
+    endpoint: "https://dxb.huifei.net/v1" # API 基础端点（OpenAI 兼容中转站）
     default_model: "gpt-realtime" # Realtime API 默认模型；如需降低成本可切换为 gpt-realtime-mini
     instructions: "你是一个智能助手，回答用户的问题" # 默认系统指令
     voice: "alloy"                    # 默认音色配置
@@ -67,7 +93,7 @@ models:
       timeout: 60                     # 请求超时时间（秒）
     # Realtime WebSocket 配置
     realtime:
-      ws_url: "wss://api.openai.com/v1/realtime" # WS 连接地址
+      ws_url: "wss://dxb.huifei.net/v1/realtime" # WS 连接地址（OpenAI 兼容中转站）
       reconnect_max_retries: 3                   # OpenAI 断线最大重连次数
       reconnect_delay: "1s"                      # 每次重连前等待时间
       # App↔Go 心跳配置

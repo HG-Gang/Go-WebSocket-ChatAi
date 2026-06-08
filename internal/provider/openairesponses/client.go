@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"TozoAI-Chat-Api/conf"
+	"TozoAI-Chat-Api/internal/logger"
 )
 
 const (
@@ -72,7 +73,8 @@ func (c *Client) Create(ctx context.Context, payload map[string]any) (*Result, e
 		return nil, fmt.Errorf("序列化 Responses API 请求失败: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responsesURL(c.cfg), bytes.NewReader(body))
+	upstreamURL := responsesURL(c.cfg)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("创建 Responses API 请求失败: %w", err)
 	}
@@ -84,7 +86,7 @@ func (c *Client) Create(ctx context.Context, payload map[string]any) (*Result, e
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求 Responses API 失败: %w", err)
+		return nil, fmt.Errorf("请求 Responses API 失败: endpoint=%s error=%s", logger.SafeURLForDisplay(upstreamURL), logger.RedactField("content", err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -107,7 +109,7 @@ func Status(cfg *conf.ModelConfig) map[string]any {
 	return map[string]any{
 		"enabled":            cfg.Enabled,
 		"default_model":      stringOrDefault(cfg.DefaultModel, defaultModel),
-		"endpoint":           stringOrDefault(cfg.Endpoint, defaultEndpoint),
+		"endpoint":           logger.SafeURLForDisplay(stringOrDefault(cfg.Endpoint, defaultEndpoint)),
 		"api_key_configured": strings.TrimSpace(cfg.APIKey) != "",
 		"timeout_ms":         timeoutMs(cfg),
 		"store_default":      defaultStore(cfg),
