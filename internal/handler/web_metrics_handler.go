@@ -197,6 +197,12 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		LatencyMs:       record.LatencyMs,
 		Error:           record.Error,
 	})
+	// 双写 DB（若已启用），保证看板跨重启可查；request_id 优先用上游响应 id
+	reqID := ""
+	if result != nil {
+		reqID = result.ID
+	}
+	persistRequestLog(c, record, modelConfig, reqID)
 	return record
 }
 

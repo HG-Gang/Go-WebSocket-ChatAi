@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TozoAI 聊天看板</title>
+    <link rel="stylesheet" href="style.css?v=20260719-chat-board">
+    <script src="/web/theme.js?v=20260607-theme" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <style>
+        .container { max-width: 1600px; }
+        .nav a { color: var(--accent-blue); text-decoration: none; margin: 0 8px; font-size: 13px; }
+        .layout { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; align-items: start; }
+        @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
+        .chat-panel { display: flex; flex-direction: column; min-height: 720px; }
+        .chat-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 12px; }
+        .chat-toolbar .form-group { flex: 1; min-width: 140px; margin: 0; }
+        .messages {
+            flex: 1; min-height: 420px; max-height: 520px; overflow: auto;
+            background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+        }
+        .msg { margin-bottom: 12px; max-width: 92%; }
+        .msg.user { margin-left: auto; }
+        .msg .bubble {
+            padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word;
+            font-size: 14px; line-height: 1.55;
+        }
+        .msg.user .bubble { background: #1f6feb33; border: 1px solid var(--accent-blue); }
+        .msg.assistant .bubble { background: var(--bg-tertiary); border: 1px solid var(--border); }
+        .msg.system .bubble { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); font-size: 12px; }
+        .msg .meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+        .msg .err { color: var(--accent-red); font-size: 12px; margin-top: 4px; }
+        .attach-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+        .attach-chip {
+            font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border);
+            background: var(--bg-tertiary); display: inline-flex; gap: 6px; align-items: center;
+        }
+        .attach-chip button { border: 0; background: transparent; color: var(--accent-red); cursor: pointer; }
+        .composer { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+        .composer textarea { min-height: 88px; }
+        .composer-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .detail-box {
+            margin-top: 12px; background: var(--bg-primary); border: 1px solid var(--border);
+            border-radius: 8px; padding: 12px; font-family: var(--font-mono); font-size: 12px;
+            max-height: 220px; overflow: auto; white-space: pre-wrap;
+        }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+        .tab-btn.active { border-color: var(--accent-blue); color: var(--accent-blue); }
+        .filters { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
+        @media (max-width: 900px) { .filters { grid-template-columns: 1fr 1fr; } }
+        .col-picker { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0 12px; font-size: 12px; color: var(--text-secondary); }
+        .col-picker label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+        .req-table-wrap { overflow: auto; max-height: 360px; border: 1px solid var(--border); border-radius: 8px; }
+        table.req-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
+        table.req-table th, table.req-table td { border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; white-space: nowrap; }
+        table.req-table th { position: sticky; top: 0; background: var(--bg-tertiary); z-index: 1; }
+        table.req-table tr:hover { background: var(--bg-tertiary); cursor: pointer; }
+        table.req-table tr.selected { outline: 1px solid var(--accent-blue); }
+        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+        .chart-box { height: 260px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; }
+        .pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+        .status-ok { color: var(--accent-green); }
+        .status-fail { color: var(--accent-red); }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header class="header">
+        <h1>TozoAI 聊天看板</h1>
+        <p class="subtitle">多模型聊天 · 附件解析 · 请求明细持久化 · 数据图表</p>
+        <div class="nav" style="margin-top:8px;">
+            <a href="/web/">WS 测试</a>
+            <a href="/web/responses.html">Responses</a>
+            <a href="/web/diagnostics.html">诊断</a>
+            <a href="/web/azure.html">Azure</a>
+            <a href="/web/chat.html">项目助手</a>
+        </div>
+        <div class="theme-switcher">
+            <label for="theme-select">颜色模式</label>
+            <select id="theme-select">
+                <option value="dark">深色</option>
+                <option value="light">浅色</option>
+                <option value="ocean">海蓝</option>
+                <option value="sepia">暖色</option>
+                <option value="contrast">高对比</option>
+            </select>
+        </div>
+    </header>
+
+    <section class="panel">
+        <h2>鉴权</h2>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="user-id">用户 ID</label>
+                <input type="text" id="user-id" value="1001">
+            </div>
+            <div class="form-group">
+                <label for="token">JWT Token</label>
+                <input type="text" id="token" placeholder="留空可自动获取">
+            </div>
+            <div class="form-group">
+                <label for="token-api">Token 接口</label>
+                <input type="text" id="token-api" value="">
+            </div>
+        </div>
+        <div class="btn-group">
+            <button class="btn btn-sm" id="btn-token">自动获取 Token</button>
+            <button class="btn btn-sm" id="btn-reload-models">刷新模型</button>
+        </div>
+    </section>
+
+    <div class="layout">
+        <section class="panel chat-panel">
+            <h2>聊天</h2>
+            <div class="chat-toolbar">
+                <div class="form-group">
+                    <label for="model-config">模型配置</label>
+                    <select id="model-config"></select>
+                </div>
+                <div class="form-group">
+                    <label for="model-name">模型名（可空=默认）</label>
+                    <input type="text" id="model-name" placeholder="如 gpt-4.1">
+                </div>
+                <div class="form-group">
+                    <label for="reasoning">推理强度</label>
+                    <select id="reasoning">
+                        <option value="default">default</option>
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                    </select>
+                </div>
+            </div>
+            <div class="messages" id="messages"></div>
+            <div class="attach-list" id="attach-list"></div>
+            <div class="composer">
+                <textarea id="chat-input" placeholder="输入问题… 支持粘贴图片；可上传图片/PDF/文本"></textarea>
+                <div class="composer-actions">
+                    <input type="file" id="file-input" accept="image/*,.pdf,.txt,.md,.csv,.json,.log,text/*" multiple hidden>
+                    <button class="btn btn-sm" id="btn-upload" type="button">上传附件</button>
+                    <button class="btn btn-primary" id="btn-send" type="button">发送</button>
+                    <button class="btn btn-sm" id="btn-clear-chat" type="button">清空会话</button>
+                    <label style="font-size:12px;color:var(--text-secondary);"><input type="checkbox" id="use-stream" checked> SSE 流式</label>
+                </div>
+            </div>
+            <h3 style="margin-top:14px;font-size:14px;">本次请求详情</h3>
+            <pre class="detail-box" id="request-detail">暂无</pre>
+        </section>
+
+        <section class="panel">
+            <h2>数据看板</h2>
+            <div class="tabs">
+                <button class="btn btn-sm tab-btn active" data-tab="list" type="button">请求列表</button>
+                <button class="btn btn-sm tab-btn" data-tab="charts" type="button">图表</button>
+            </div>
+
+            <div id="tab-list">
+                <div class="filters">
+                    <div class="form-group">
+                        <label for="f-from">开始时间</label>
+                        <input type="datetime-local" id="f-from">
+                    </div>
+                    <div class="form-group">
+                        <label for="f-to">结束时间</label>
+                        <input type="datetime-local" id="f-to">
+                    </div>
+                    <div class="form-group">
+                        <label for="f-model">模型</label>
+                        <input type="text" id="f-model" placeholder="精确匹配">
+                    </div>
+                    <div class="form-group">
+                        <label for="f-status">状态</label>
+                        <select id="f-status">
+                            <option value="">全部</option>
+                            <option value="completed">completed</option>
+                            <option value="failed">failed</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="f-config">model_config</label>
+                        <input type="text" id="f-config" placeholder="如 openairesponses">
+                    </div>
+                    <div class="form-group">
+                        <label for="f-q">关键字</label>
+                        <input type="text" id="f-q" placeholder="endpoint/error/request_id">
+                    </div>
+                </div>
+                <div class="btn-group" style="margin-bottom:8px;">
+                    <button class="btn btn-sm btn-primary" id="btn-filter" type="button">筛选</button>
+                    <button class="btn btn-sm" id="btn-reset-filter" type="button">重置</button>
+                    <button class="btn btn-sm" id="btn-refresh-list" type="button">刷新</button>
+                </div>
+                <div class="col-picker" id="col-picker"></div>
+                <div class="req-table-wrap">
+                    <table class="req-table">
+                        <thead id="req-thead"></thead>
+                        <tbody id="req-tbody"></tbody>
+                    </table>
+                </div>
+                <div class="pager">
+                    <button class="btn btn-sm" id="btn-prev" type="button">上一页</button>
+                    <span id="page-info">-</span>
+                    <button class="btn btn-sm" id="btn-next" type="button">下一页</button>
+                </div>
+                <h3 style="margin-top:12px;font-size:14px;">行详情 / Token 明细</h3>
+                <pre class="detail-box" id="row-detail">点击表格行查看</pre>
+            </div>
+
+            <div id="tab-charts" hidden>
+                <div class="form-group" style="max-width:200px;margin-bottom:12px;">
+                    <label for="stats-period">统计周期</label>
+                    <select id="stats-period">
+                        <option value="day">今天（按小时）</option>
+                        <option value="week">近 7 天</option>
+                        <option value="month">近 30 天</option>
+                    </select>
+                </div>
+                <div class="charts">
+                    <div class="chart-box" id="chart-timeline"></div>
+                    <div class="chart-box" id="chart-tokens"></div>
+                    <div class="chart-box" id="chart-cost"></div>
+                    <div class="chart-box" id="chart-status"></div>
+                    <div class="chart-box" id="chart-ft" style="grid-column:1/-1;"></div>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+<script src="chat-board.js?v=20260719-chat-board"></script>
+</body>
+</html>

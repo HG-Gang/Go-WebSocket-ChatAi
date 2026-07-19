@@ -104,12 +104,19 @@ type GlobalConfig struct {
 		CleanupInterval string `mapstructure:"cleanup_interval"` // 日志清理调度间隔（如 "24h"）
 	} `mapstructure:"logs"`
 
-	// DB 数据库基础配置（预留）
+	// DB 数据库基础配置（Web 请求明细等）
 	DB struct {
 		Enabled bool   `mapstructure:"enabled"` // 是否启用数据库连接
-		Driver  string `mapstructure:"driver"`  // 数据库驱动名称（如 mysql, postgres）
-		DSN     string `mapstructure:"dsn"`     // 数据库连接字符串（Data Source Name）
+		Driver  string `mapstructure:"driver"`  // 数据库驱动：sqlite / mysql
+		DSN     string `mapstructure:"dsn"`     // 连接串；sqlite 默认 ./data/tozoai.db
 	} `mapstructure:"db"`
+
+	// WebChat 聊天看板上传与附件限制
+	WebChat struct {
+		MaxUploadBytes int64  `mapstructure:"max_upload_bytes"` // 单文件上限，默认 10MB
+		MaxPDFChars    int    `mapstructure:"max_pdf_chars"`    // PDF 抽取文本上限
+		UploadDir      string `mapstructure:"upload_dir"`       // 上传目录
+	} `mapstructure:"web_chat"`
 
 	// 全局功能开关
 	RateLimit struct {

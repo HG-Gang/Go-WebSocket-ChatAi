@@ -18,6 +18,7 @@ import (
 	"TozoAI-Chat-Api/internal/middleware"
 	"TozoAI-Chat-Api/internal/service/monitor"
 	"TozoAI-Chat-Api/internal/service/redis"
+	"TozoAI-Chat-Api/internal/service/requestlog"
 	"TozoAI-Chat-Api/internal/service/session"
 
 	_ "TozoAI-Chat-Api/internal/provider/azureai"
@@ -39,9 +40,17 @@ func main() {
 	redis.Init()
 	conf.InitModelConfig()
 
-	r := buildRouter()
-
 	serverLog := logger.GetModelLogger("global")
+	if conf.Global != nil && conf.Global.DB.Enabled {
+		if err := requestlog.Init(true, conf.Global.DB.Driver, conf.Global.DB.DSN); err != nil {
+			serverLog.Fatal("requestlog db init failed", zap.Error(err))
+		}
+		serverLog.Info("requestlog db ready",
+			zap.String("driver", conf.Global.DB.Driver),
+			zap.String("dsn", conf.Global.DB.DSN))
+	}
+
+	r := buildRouter()
 	server := &http.Server{
 		Addr:              conf.Global.Server.Addr,
 		Handler:           r,
@@ -95,6 +104,7 @@ func main() {
 		}
 
 		redis.Close()
+		requestlog.Close()
 		serverLog.Info("service shutdown complete")
 		logger.SyncAll()
 		os.Exit(0)
@@ -181,6 +191,10 @@ func registerPublicRoutes(public *gin.RouterGroup) {
 func registerProtectedRoutes(auth *gin.RouterGroup) {
 	auth.GET("/ws/realtime/openai", handler.OpenAIRealtimeHandler)
 	auth.POST("/api/openai/responses", handler.OpenAIResponsesHandler)
+	auth.POST("/api/web/chat", handler.WebChatHandler)
+	auth.POST("/api/web/upload", handler.WebUploadHandler)
+	auth.GET("/api/web/requests", handler.WebRequestsHandler)
+	auth.GET("/api/web/requests/stats", handler.WebRequestStatsHandler)
 	auth.GET("/api/workspace/projects", handler.WorkspaceProjectsHandler)
 	auth.GET("/api/workspace/list", handler.WorkspaceListHandler)
 	auth.GET("/api/workspace/read", handler.WorkspaceReadHandler)
