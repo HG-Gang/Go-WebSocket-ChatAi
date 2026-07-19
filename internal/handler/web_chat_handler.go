@@ -166,8 +166,9 @@ func WebChatHandler(c *gin.Context) {
 		modelConfig = "openairesponses"
 	}
 	cfg := conf.GetModel(modelConfig)
+	// GetModel 在缺失时返回空结构体指针（非 nil），必须以 Enabled 判断是否可用
 	if cfg == nil || !cfg.Enabled {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": modelConfig + " model is not enabled"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": modelConfig + " model is not enabled or not found"})
 		return
 	}
 

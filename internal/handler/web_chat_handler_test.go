@@ -121,6 +121,14 @@ func TestWebUploadAndRequestsListClosedLoop(t *testing.T) {
 	}
 	t.Cleanup(requestlog.Close)
 
+	// 避免测试把上传文件写到仓库相对路径 ./data/uploads
+	prevGlobal := conf.Global
+	conf.Global = &conf.GlobalConfig{}
+	conf.Global.WebChat.UploadDir = filepath.Join(dir, "uploads")
+	conf.Global.WebChat.MaxUploadBytes = 1 << 20
+	conf.Global.WebChat.MaxPDFChars = 10000
+	t.Cleanup(func() { conf.Global = prevGlobal })
+
 	// upload
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
@@ -196,7 +204,7 @@ func TestWebUploadAndRequestsListClosedLoop(t *testing.T) {
 
 func TestWebChatRejectsAzure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	// inject fake global model
+	// inject fake global model into GetModel cache
 	prev := conf.Global
 	conf.Global = &conf.GlobalConfig{
 		Models: map[string]conf.ModelConfig{
@@ -208,7 +216,13 @@ func TestWebChatRejectsAzure(t *testing.T) {
 			},
 		},
 	}
-	t.Cleanup(func() { conf.Global = prev })
+	conf.InitModelConfig()
+	t.Cleanup(func() {
+		conf.Global = prev
+		if prev != nil {
+			conf.InitModelConfig()
+		}
+	})
 
 	r := gin.New()
 	r.POST("/chat", WebChatHandler)
