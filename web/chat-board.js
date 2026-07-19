@@ -268,22 +268,29 @@
         try {
             const resp = await fetch('/api/web/models', { headers: authHeaders() });
             const data = await resp.json();
-            const list = (data.data || []).filter((m) => m.enabled);
+            // 仅展示适合统一聊天（Responses HTTP）的配置：启用、有 endpoint、有 Key、非 Azure
+            const list = (data.data || []).filter((m) => {
+                if (!m.enabled) return false;
+                if (!m.api_key_configured) return false;
+                if (!m.endpoint) return false;
+                const t = String(m.type || '').toLowerCase();
+                const n = String(m.name || '').toLowerCase();
+                if (t === 'azure' || n === 'azureai') return false;
+                return true;
+            });
             state.models = list;
             const sel = $('model-config');
             sel.innerHTML = '';
             list.forEach((m) => {
-                // 聊天优先展示 HTTP 类配置；realtime 也可显示但可能不兼容
                 const opt = document.createElement('option');
                 opt.value = m.name;
-                opt.textContent = `${m.name} · ${m.default_model || '-'} · ${m.type || ''}${m.api_key_configured ? '' : ' (无Key)'}`;
+                opt.textContent = `${m.name} · ${m.default_model || '-'} · ${m.type || ''}`;
                 sel.appendChild(opt);
             });
-            // 默认选 openairesponses
             if ([...sel.options].some((o) => o.value === 'openairesponses')) {
                 sel.value = 'openairesponses';
             }
-            if (!list.length) appendMsg('system', '没有已启用的模型配置');
+            if (!list.length) appendMsg('system', '没有可用的聊天模型（需 enabled + API Key + HTTP endpoint，且非 Azure）');
         } catch (e) {
             appendMsg('system', '加载模型失败: ' + e.message);
         }
@@ -400,11 +407,14 @@
             model_config: $('model-config').value,
             model: ($('model-name').value || '').trim(),
             reasoning_effort: $('reasoning').value,
-            messages: state.messages.map((m) => ({
-                role: m.role,
-                content: m.content,
-                attachment_ids: m.attachment_ids || [],
-            })),
+            // 只上传 user/assistant，避免 system 气泡进上游；附件仅挂在 user 消息上
+            messages: state.messages
+                .filter((m) => m.role === 'user' || m.role === 'assistant')
+                .map((m) => ({
+                    role: m.role,
+                    content: m.content || '',
+                    attachment_ids: m.role === 'user' ? (m.attachment_ids || []) : [],
+                })),
             stream: $('use-stream').checked,
         };
 
@@ -457,41 +467,52 @@
         let full = '';
         bubble.textContent = '';
 
+        let finished = false;
+        const handleBlock = (block) => {
+            const lines = block.split('\n');
+            let event = 'message';
+            let dataLine = '';
+            for (const line of lines) {
+                if (line.startsWith('event:')) event = line.slice(6).trim();
+                if (line.startsWith('data:')) dataLine += line.slice(5).trim();
+            }
+            if (!dataLine) return;
+            let payload;
+            try { payload = JSON.parse(dataLine); } catch { return; }
+            if (event === 'delta' && payload.text) {
+                full += payload.text;
+                bubble.textContent = full;
+                $('messages').scrollTop = $('messages').scrollHeight;
+            } else if (event === 'done') {
+                full = payload.output_text || full;
+                bubble.textContent = full || '(空响应)';
+                state.messages.push({ role: 'assistant', content: full });
+                if (payload.record) showRecordDetail($('request-detail'), payload.record);
+                finished = true;
+            } else if (event === 'error') {
+                bubble.textContent = payload.error || '错误';
+                state.messages.push({ role: 'assistant', content: bubble.textContent });
+                if (payload.record) showRecordDetail($('request-detail'), payload.record);
+                finished = true;
+            }
+        };
+
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             buf += decoder.decode(value, { stream: true });
             const parts = buf.split('\n\n');
             buf = parts.pop() || '';
-            for (const block of parts) {
-                const lines = block.split('\n');
-                let event = 'message';
-                let dataLine = '';
-                for (const line of lines) {
-                    if (line.startsWith('event:')) event = line.slice(6).trim();
-                    if (line.startsWith('data:')) dataLine += line.slice(5).trim();
-                }
-                if (!dataLine) continue;
-                let payload;
-                try { payload = JSON.parse(dataLine); } catch { continue; }
-                if (event === 'delta' && payload.text) {
-                    full += payload.text;
-                    bubble.textContent = full;
-                    $('messages').scrollTop = $('messages').scrollHeight;
-                } else if (event === 'done') {
-                    full = payload.output_text || full;
-                    bubble.textContent = full || '(空响应)';
-                    state.messages.push({ role: 'assistant', content: full });
-                    if (payload.record) showRecordDetail($('request-detail'), payload.record);
-                } else if (event === 'error') {
-                    bubble.textContent = payload.error || '错误';
-                    state.messages.push({ role: 'assistant', content: bubble.textContent });
-                    if (payload.record) showRecordDetail($('request-detail'), payload.record);
-                }
-            }
+            parts.forEach(handleBlock);
         }
-        if (full && !state.messages.length) {
-            // noop
+        // 刷尾包，避免最后一帧未以 \n\n 结尾时丢失 done
+        if (buf.trim()) handleBlock(buf);
+        if (!finished && full) {
+            bubble.textContent = full;
+            state.messages.push({ role: 'assistant', content: full });
+        } else if (!finished) {
+            bubble.textContent = bubble.textContent || '未收到完整响应';
+            state.messages.push({ role: 'assistant', content: bubble.textContent });
         }
     }
 

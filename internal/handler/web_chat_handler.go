@@ -187,14 +187,21 @@ func WebChatHandler(c *gin.Context) {
 		payload["reasoning"] = map[string]any{"effort": req.ReasoningEffort}
 	}
 
-	// 路由：目前 HTTP 统一走 Responses 客户端（openairesponses / 兼容 endpoint 的配置）
-	// azureai 若启用且 type=azure，一期返回明确错误，避免静默错误
+	// 一期：统一走 OpenAI Responses 形状的 HTTP 客户端。
+	// Azure Chat Completions 协议不同，禁止静默走错路径。
 	providerType := metricStringFromExtra(cfg.Extra, "type", inferModelType(modelConfig, cfg.Endpoint))
-	if strings.EqualFold(providerType, "azure") || strings.EqualFold(modelConfig, "azureai") {
-		// 尝试走 Responses 形状不兼容时给出清晰提示
-		if !strings.Contains(strings.ToLower(cfg.Endpoint), "openai") && conf.GetModel("openairesponses") != nil {
-			// azure chat 可后续扩展；一期要求闭环：若用户选 azureai 且 enabled，用错误提示
-		}
+	if !supportsResponsesChat(modelConfig, providerType, cfg) {
+		msg := fmt.Sprintf("模型配置 %s (type=%s) 暂不支持统一聊天入口，请选择 openairesponses 或兼容 /v1/responses 的配置", modelConfig, providerType)
+		c.JSON(http.StatusNotImplemented, gin.H{"code": 501, "error": msg})
+		return
+	}
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": "model api_key is not configured"})
+		return
+	}
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": "model endpoint is not configured"})
+		return
 	}
 
 	log := logger.GetModelLogger(modelConfig)
@@ -355,20 +362,63 @@ func writeChatSSE(c *gin.Context, text, errMsg string, record WebRequestRecord, 
 	})
 }
 
+func supportsResponsesChat(modelConfig, providerType string, cfg *conf.ModelConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(modelConfig))
+	ptype := strings.ToLower(strings.TrimSpace(providerType))
+	if name == "azureai" || ptype == "azure" {
+		return false
+	}
+	// openairesponses / openai / 自定义只要有 HTTP endpoint 即允许尝试 Responses
+	return strings.TrimSpace(cfg.Endpoint) != ""
+}
+
 func buildChatInput(messages []chatMessage) (any, error) {
-	// Responses API input: 字符串或 content 数组
-	// 多轮：拼成带 role 的 message 列表
+	// Responses API 多轮：user 用 input_*，assistant 用 output_text，避免角色内容类型错误导致上游 400。
 	items := make([]map[string]any, 0, len(messages))
 	for _, m := range messages {
-		role := strings.TrimSpace(m.Role)
+		role := strings.ToLower(strings.TrimSpace(m.Role))
 		if role == "" {
 			role = "user"
 		}
+		if role == "system" {
+			// system 合并进 instructions 更合适；此处降级为 user 前缀，保证不丢上下文
+			role = "user"
+			if strings.TrimSpace(m.Content) != "" {
+				m.Content = "[system]\n" + m.Content
+			}
+		}
+		if role != "user" && role != "assistant" {
+			return nil, fmt.Errorf("unsupported role: %s", m.Role)
+		}
+
 		parts := make([]map[string]any, 0, 4)
 		content := strings.TrimSpace(m.Content)
-		// 附件
+
+		if role == "assistant" {
+			if content == "" {
+				continue // 跳过空助手消息，避免污染多轮
+			}
+			parts = append(parts, map[string]any{
+				"type": "output_text",
+				"text": content,
+			})
+			items = append(items, map[string]any{
+				"role":    "assistant",
+				"content": parts,
+			})
+			continue
+		}
+
+		// user (+ 附件)
 		var textExtras []string
 		for _, aid := range m.AttachmentIDs {
+			aid = strings.TrimSpace(aid)
+			if aid == "" {
+				continue
+			}
 			attachmentStore.mu.RLock()
 			meta := attachmentStore.items[aid]
 			attachmentStore.mu.RUnlock()
@@ -381,10 +431,13 @@ func buildChatInput(messages []chatMessage) (any, error) {
 				if err != nil {
 					return nil, fmt.Errorf("read attachment %s: %w", aid, err)
 				}
-				b64 := base64.StdEncoding.EncodeToString(data)
-				dataURL := "data:" + meta.Mime + ";base64," + b64
+				mime := meta.Mime
+				if mime == "" || mime == "application/octet-stream" {
+					mime = http.DetectContentType(data)
+				}
+				dataURL := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 				parts = append(parts, map[string]any{
-					"type": "input_image",
+					"type":      "input_image",
 					"image_url": dataURL,
 				})
 			case "pdf", "text":
@@ -410,11 +463,13 @@ func buildChatInput(messages []chatMessage) (any, error) {
 		if len(parts) == 0 {
 			return nil, fmt.Errorf("empty message content")
 		}
-		// 若仅有文本单 part，可用简化；统一用 content 数组
 		items = append(items, map[string]any{
-			"role":    role,
+			"role":    "user",
 			"content": parts,
 		})
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("messages is empty after normalize")
 	}
 	return items, nil
 }
@@ -571,9 +626,9 @@ func persistRequestLog(c *gin.Context, record WebRequestRecord, modelConfig, req
 	if !requestlog.Enabled() {
 		return
 	}
-	provider := modelConfig
+	provider := firstNonEmpty(record.Provider, modelConfig)
 	rec := requestlog.Record{
-		RequestID:       firstNonEmpty(requestID, fmt.Sprintf("req-%d", record.ID)),
+		RequestID:       firstNonEmpty(requestID, record.RequestID, fmt.Sprintf("req-%d", record.ID)),
 		Time:            record.Time,
 		Timestamp:       record.Timestamp,
 		ModelConfig:     record.ModelConfig,

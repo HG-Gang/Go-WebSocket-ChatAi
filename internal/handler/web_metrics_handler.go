@@ -39,10 +39,12 @@ var webMetricsAudit = struct {
 // APIKey 只保存脱敏值；Error 只保存可展示错误文本，不能写入完整上游密钥或原始敏感请求体。
 type WebRequestRecord struct {
 	ID              int64   `json:"id"`
+	RequestID       string  `json:"request_id,omitempty"`
 	Time            string  `json:"time"`
 	Timestamp       int64   `json:"timestamp"`
 	ModelConfig     string  `json:"model_config"`
 	Model           string  `json:"model"`
+	Provider        string  `json:"provider,omitempty"`
 	InputTokens     int64   `json:"input_tokens"`
 	OutputTokens    int64   `json:"output_tokens"`
 	CachedTokens    int64   `json:"cached_input_tokens"`
@@ -158,10 +160,16 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		billingMode = metricStringFromExtra(cfg.Extra, "billing_mode", "token")
 	}
 
+	reqID := ""
+	if result != nil {
+		reqID = result.ID
+	}
 	totalCost := estimateResponseCost(cfg, usage)
 	record := addWebRequestRecord(WebRequestRecord{
+		RequestID:       reqID,
 		ModelConfig:     modelConfig,
 		Model:           model,
+		Provider:        modelConfig,
 		InputTokens:     usage.Input,
 		OutputTokens:    usage.Output,
 		CachedTokens:    usage.Cached,
@@ -197,12 +205,8 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		LatencyMs:       record.LatencyMs,
 		Error:           record.Error,
 	})
-	// 双写 DB（若已启用），保证看板跨重启可查；request_id 优先用上游响应 id
-	reqID := ""
-	if result != nil {
-		reqID = result.ID
-	}
-	persistRequestLog(c, record, modelConfig, reqID)
+	// 双写 DB（若已启用），保证看板跨重启可查
+	persistRequestLog(c, record, modelConfig, record.RequestID)
 	return record
 }
 
