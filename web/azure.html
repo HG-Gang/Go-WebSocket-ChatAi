@@ -1,3 +1,9 @@
+<!--
+web/azure.html
+页面功能：Azure OpenAI 监控调试页，轮询 /api/debug/status 展示 Azure 基础配置、各模块（Realtime、Chat Completions、Completions、文生图、图生图、TTS、STT、TST）的 Deployment、状态、本地接口与监控重点，并支持一键复制原始诊断 JSON。
+依赖接口/资源：style.css、theme.js；/api/debug/status。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；Azure 凭据只存在于服务端配置，页面仅展示状态与脱敏信息。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>

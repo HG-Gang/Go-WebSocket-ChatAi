@@ -1,3 +1,5 @@
+// internal/handler/client_location_test.go
+// 客户端地理位置提取测试：验证代理地理 Header 的解析优先级与无 Header 时返回 nil。
 package handler
 
 import (

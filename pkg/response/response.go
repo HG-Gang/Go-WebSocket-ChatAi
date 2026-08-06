@@ -1,6 +1,9 @@
 // pkg/response/response.go
 // 全局统一响应格式（App 端 JSON 返回结构）
 // 所有返回给 App 的消息都必须使用此格式包装
+// 文件功能：定义并构造返回给 App 的统一 JSON 响应结构。输入为业务状态码、响应事件
+// 类型与内容；输出为 StandardResponse 及其 JSON 字节流，响应 ID 与时间戳在此自动填充。
+// 不负责：业务错误码的语义定义（见 pkg/errors）与消息的发送/推送。
 package response
 
 import (
@@ -39,6 +42,7 @@ type StandardResponse struct {
 }
 
 // NewResponse 创建标准响应（自动填充时间戳和响应ID）
+// 无失败路径：响应 ID 生成极端失败时降级回退（见 generateResponseID），始终返回可用对象。
 func NewResponse(code int, event ResponseEvent, content interface{}) *StandardResponse {
 	return &StandardResponse{
 		Code:           code,
@@ -51,6 +55,7 @@ func NewResponse(code int, event ResponseEvent, content interface{}) *StandardRe
 }
 
 // NewResponseWithID 创建标准响应（使用指定的 responseId）
+// 无失败路径：沿用调用方传入的响应 ID 与输入时间戳，仅响应时间戳取当前毫秒时间。
 func NewResponseWithID(code int, event ResponseEvent, responseID string, content interface{}, inputTs int64) *StandardResponse {
 	return &StandardResponse{
 		Code:           code,
@@ -63,18 +68,24 @@ func NewResponseWithID(code int, event ResponseEvent, responseID string, content
 }
 
 // Success 成功响应快捷方法
+// 等价于 NewResponse(0, event, content)，无失败路径。
 func Success(event ResponseEvent, content interface{}) *StandardResponse {
 	return NewResponse(0, event, content)
 }
 
 // Error 错误响应快捷方法
+// 等价于 NewResponse(code, EventError, {"message": message})，无失败路径。
 func Error(code int, message string) *StandardResponse {
 	return NewResponse(code, EventError, map[string]string{"message": message})
 }
 
 // ToJSON 序列化为 JSON 字节流
+// 序列化失败时返回错误；同时输出 responseId 与 response_id 两个字段，兼容新旧 App。
 func (r *StandardResponse) ToJSON() ([]byte, error) {
 	type alias StandardResponse
+	// 通过内嵌 alias 展开全部原有字段，并追加 snake_case 的 response_id：
+	// 旧 App 读取 camelCase 的 responseId，新 App 读取 response_id，双字段并存
+	// 避免改版过渡期旧端解析失败。
 	payload := struct {
 		*alias
 		ResponseIDSnake string `json:"response_id,omitempty"`
@@ -86,6 +97,7 @@ func (r *StandardResponse) ToJSON() ([]byte, error) {
 }
 
 // generateResponseID 生成唯一响应ID
+// UUIDv7 生成失败时回退到 UUIDv4，保证任何环境下都能返回可用 ID，不向调用方抛错。
 func generateResponseID() string {
 	v7, err := uuid.NewV7()
 	if err != nil {

@@ -1,5 +1,9 @@
 /**
  * web/chat-board.js — 多模型聊天 + 请求看板
+ *
+ * 页面功能：驱动 chat-board.html 的统一 HTTP（Responses）多模型聊天、附件上传解析、请求记录持久化看板与 ECharts 统计图表；负责 Token 获取、模型列表加载、SSE 流式/JSON 聊天与请求筛选分页。
+ * 依赖接口：/test/generate-token、/api/web/models、/api/web/upload、/api/web/chat（支持 SSE）、/api/web/requests、/api/web/requests/stats。
+ * 调试用途：验证统一聊天链路、附件上传与请求明细/费用统计，仅本地开发调试。
  */
 (function () {
     const COL_KEY = 'tozo-chat-board-columns';
@@ -43,6 +47,7 @@
 
     document.addEventListener('DOMContentLoaded', () => {
         $('token-api').value = `${location.origin}/test/generate-token`;
+        initMobileView();
         bindUI();
         renderColPicker();
         renderTableHeader();
@@ -53,6 +58,39 @@
             refreshStats();
         });
     });
+
+    function isMobileLayout() {
+        return window.matchMedia('(max-width: 768px)').matches;
+    }
+
+    function setMainView(view) {
+        const v = view === 'board' ? 'board' : 'chat';
+        document.body.setAttribute('data-view', v);
+        try { localStorage.setItem('tozo-chat-board-view', v); } catch (_) {}
+        document.querySelectorAll('.view-btn').forEach((btn) => {
+            btn.classList.toggle('active', btn.dataset.view === v);
+        });
+        if (v === 'board') {
+            refreshList();
+            refreshStats();
+            setTimeout(resizeCharts, 80);
+        }
+    }
+
+    function initMobileView() {
+        let saved = 'chat';
+        try { saved = localStorage.getItem('tozo-chat-board-view') || 'chat'; } catch (_) {}
+        document.body.setAttribute('data-view', saved === 'board' ? 'board' : 'chat');
+        document.querySelectorAll('.view-btn').forEach((btn) => {
+            btn.classList.toggle('active', btn.dataset.view === document.body.getAttribute('data-view'));
+        });
+    }
+
+    function resizeCharts() {
+        Object.values(state.charts).forEach((c) => {
+            try { c && c.resize(); } catch (_) {}
+        });
+    }
 
     function bindUI() {
         $('btn-token').onclick = () => generateToken();
@@ -67,10 +105,16 @@
         $('file-input').onchange = (e) => uploadFiles(e.target.files);
         $('chat-input').addEventListener('paste', onPaste);
         $('chat-input').addEventListener('keydown', (e) => {
+            // 手机端 Enter 换行，桌面 Ctrl/Cmd+Enter 或非 shift Enter 发送
             if (e.key === 'Enter' && !e.shiftKey) {
+                if (isMobileLayout() && !e.ctrlKey && !e.metaKey) return;
                 e.preventDefault();
                 sendChat();
             }
+        });
+
+        document.querySelectorAll('.view-btn').forEach((btn) => {
+            btn.onclick = () => setMainView(btn.dataset.view);
         });
 
         document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -82,7 +126,7 @@
                 $('tab-charts').hidden = tab !== 'charts';
                 if (tab === 'charts') {
                     refreshStats();
-                    setTimeout(() => Object.values(state.charts).forEach((c) => c && c.resize()), 50);
+                    setTimeout(resizeCharts, 50);
                 }
             };
         });
@@ -103,6 +147,13 @@
         };
         $('stats-period').onchange = () => refreshStats();
 
+        let resizeTimer = null;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(resizeCharts, 120);
+        });
+        window.addEventListener('orientationchange', () => setTimeout(resizeCharts, 200));
+
         if (typeof window.initThemeFromSelect === 'function') {
             // theme.js may auto-bind
         } else if ($('theme-select')) {
@@ -115,6 +166,7 @@
                 document.body.classList.remove('theme-dark', 'theme-light', 'theme-ocean', 'theme-sepia', 'theme-contrast');
                 if (t !== 'dark') document.body.classList.add(`theme-${t}`);
                 localStorage.setItem('tozo-ws-theme', t);
+                setTimeout(resizeCharts, 50);
             };
         }
     }
@@ -430,6 +482,10 @@
         }
         refreshList();
         refreshStats();
+        // 手机端发完消息后提示可切到看板看明细（不强制跳转）
+        if (isMobileLayout() && $('request-detail').textContent && $('request-detail').textContent !== '暂无') {
+            // keep user in chat; board data already refreshed
+        }
     }
 
     async function sendChatJSON(body, bubble) {

@@ -1,3 +1,6 @@
+// cmd/server/main_test.go
+// 文件功能：验证生产环境路由安全（测试 token 与调试接口不可匿名访问）、可信代理配置
+// 生效，以及 main 中周期监控与日志清理调度接线存在（通过源码文本断言）。
 package main
 
 import (

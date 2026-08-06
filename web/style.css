@@ -1,4 +1,7 @@
-/* web/style.css — TozoAI WebSocket 测试面板样式 */
+/* web/style.css — TozoAI WebSocket 测试面板样式
+
+   页面功能：Web 调试面板共享样式，定义主题 CSS 变量与表单、按钮、面板、状态卡片、日志区、模态框等组件样式。
+   依赖关系：由 /web 下调试页面（index/azure/responses/diagnostics 等）引用；与 theme.js 配合实现深色/浅色等主题切换。 */
 
 :root {
     --bg-primary: #0d1117;

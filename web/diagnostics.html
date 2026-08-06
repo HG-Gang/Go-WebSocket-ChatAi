@@ -1,3 +1,9 @@
+<!--
+web/diagnostics.html
+页面功能：诊断看板调试页，聚合 App / Go / Redis / OpenAI Realtime 运行状态，展示健康检查、服务端配置、Redis Key、活跃会话表格与请求/Token/费用资源统计，支持定时自动刷新。
+依赖接口/资源：style.css、theme.js；/api/debug/status、/health、/api/redis/keys、/api/stats/resources。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；仅以只读方式查看服务状态与统计，不发起任何写操作。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>

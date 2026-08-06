@@ -1,3 +1,5 @@
+// internal/service/requestlog/store_test.go
+// 持久化存储集成测试：覆盖建库、写入、分页查询与聚合统计的完整链路。
 package requestlog
 
 import (
@@ -69,7 +71,7 @@ func TestInsertListStats(t *testing.T) {
 		t.Fatalf("stats requests=%v", stats.Summary["requests"])
 	}
 
-	// ensure file exists
+	// 验证 SQLite 文件确实落盘。
 	if _, err := os.Stat(dsn); err != nil {
 		t.Fatalf("db file: %v", err)
 	}

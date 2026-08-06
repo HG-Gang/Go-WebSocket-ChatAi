@@ -1,3 +1,7 @@
+// internal/service/metrics/metrics_test.go
+// 文件功能：验证内存指标收集器的会话登记、热路径计数、快照导出与资源事件上报。
+// 测试通过 resetMetricsForTest 重建 global 收集器，避免用例间互相污染；
+// 部分用例直接读取 metrics.go 源码文本，验证热路径实现不使用全局锁。
 package metrics
 
 import (
@@ -221,6 +225,7 @@ func TestCapacityRejectedDoesNotUseGlobalMutex(t *testing.T) {
 	}
 }
 
+// functionBody 从源码文本提取指定函数体，供热路径实现约束类测试断言使用。
 func functionBody(t *testing.T, source, name string) string {
 	t.Helper()
 	start := strings.Index(source, "func "+name+"(")
@@ -248,6 +253,7 @@ func functionBody(t *testing.T, source, name string) string {
 	return ""
 }
 
+// resetMetricsForTest 重建 global 收集器，保证每个用例从干净的计数器状态开始。
 func resetMetricsForTest() {
 	global = &collector{
 		started:  time.Now(),

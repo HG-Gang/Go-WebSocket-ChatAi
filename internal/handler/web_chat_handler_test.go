@@ -1,3 +1,12 @@
+// internal/handler/web_chat_handler_test.go
+// Web 聊天与附件上传链路的单元测试。
+//
+// 测试范围：
+//   - supportsResponsesChat / buildChatInput / classifyUpload 的纯函数行为。
+//   - WebUploadHandler 与请求明细/统计接口的上传-入库-查询闭环（sqlite 临时库）。
+//   - WebChatHandler 对 azureai 协议不兼容配置的 501 拒绝。
+//
+// 注意：测试使用 t.TempDir 隔离上传目录与 sqlite 数据库，不触碰真实数据目录。
 package handler
 
 import (
@@ -167,16 +176,16 @@ func TestWebUploadAndRequestsListClosedLoop(t *testing.T) {
 
 	// insert a request log as chat would
 	_, err = requestlog.Insert(req.Context(), requestlog.Record{
-		RequestID:   "resp_test_1",
-		ModelConfig: "openairesponses",
-		Model:       "gpt-4.1",
-		Provider:    "openairesponses",
-		InputTokens: 11,
+		RequestID:    "resp_test_1",
+		ModelConfig:  "openairesponses",
+		Model:        "gpt-4.1",
+		Provider:     "openairesponses",
+		InputTokens:  11,
 		OutputTokens: 22,
-		TotalTokens: 33,
-		Status:      "completed",
-		Timestamp:   1_700_000_000_000,
-		Time:        "2026-07-19 12:00:00",
+		TotalTokens:  33,
+		Status:       "completed",
+		Timestamp:    1_700_000_000_000,
+		Time:         "2026-07-19 12:00:00",
 	})
 	if err != nil {
 		t.Fatal(err)

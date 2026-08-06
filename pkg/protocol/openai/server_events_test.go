@@ -1,3 +1,7 @@
+// pkg/protocol/openai/server_events_test.go
+// 文件功能：验证 UnmarshalServerEvent 对当前事件名与旧版预览事件名的类型分发——
+// 新版事件名解析出对应新事件类型，旧版事件名（response.audio.delta 等）仍能
+// 映射到同一结构体，保证升级过渡期透传语义不变。
 package openai
 
 import "testing"

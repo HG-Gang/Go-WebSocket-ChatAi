@@ -1,7 +1,10 @@
-// conf 包提供配置结构体定义与管理：
-// 1. GlobalConfig：系统全局配置（环境/服务/Redis/JWT/日志/开关）
-// 2. ModelConfig：模型专属配置（APIKey/限流/Realtime WS/扩展参数）
-// 3. 配置缓存与工具方法：支持高并发读取模型配置，支持环境判断与热更新。
+// conf/config.go
+// 文件功能：定义全局配置（GlobalConfig）与模型配置（ModelConfig）结构体，
+// 提供全局单例 conf.Global、模型配置缓存（GetModel/InitModelConfig/热更新）与环境判断工具。
+// 输入是 loader.go 解码并校验后的配置，输出是供各包并发只读查询的配置对象。
+// 不负责：配置文件的读取、合并与生产校验（见 loader.go）。
+// 安全边界：缓存未初始化或模型不存在时 GetModel 返回空配置而非 nil，避免调用方空指针；
+// 计时字段单位：MaxSessionTTL 为秒、SendQueueTimeoutMs 为毫秒、MaxUploadBytes 为字节。
 package conf
 
 import (
@@ -78,13 +81,13 @@ type GlobalConfig struct {
 	} `mapstructure:"jwt"`
 
 	Security struct {
-		PublicDebugEnabled      bool     `mapstructure:"public_debug_enabled"`
-		PublicTokenEnabled      bool     `mapstructure:"public_token_enabled"`
-		AllowedOrigins          []string `mapstructure:"allowed_origins"`
-		TrustedProxies          []string `mapstructure:"trusted_proxies"`
-		AllowUpstreamQueryKey   bool     `mapstructure:"allow_upstream_query_key"`
-		WorkspaceWriteConfirm   bool     `mapstructure:"workspace_write_confirm"`
-		WorkspaceAuditRetention int      `mapstructure:"workspace_audit_retention_days"`
+		PublicDebugEnabled      bool     `mapstructure:"public_debug_enabled"`           // 是否开放公开调试接口（生产环境必须关闭）
+		PublicTokenEnabled      bool     `mapstructure:"public_token_enabled"`           // 是否开放测试 token 生成接口（生产环境必须关闭）
+		AllowedOrigins          []string `mapstructure:"allowed_origins"`                // CORS 允许的 Origin 白名单（生产环境必须非空）
+		TrustedProxies          []string `mapstructure:"trusted_proxies"`                // 可信反向代理 IP 列表；为空时不信任任何代理，忽略 X-Forwarded-For
+		AllowUpstreamQueryKey   bool     `mapstructure:"allow_upstream_query_key"`       // 是否允许上游请求携带 query key（生产环境必须关闭）
+		WorkspaceWriteConfirm   bool     `mapstructure:"workspace_write_confirm"`        // 工作区写操作是否需要人工确认
+		WorkspaceAuditRetention int      `mapstructure:"workspace_audit_retention_days"` // 工作区审计日志保留天数
 	} `mapstructure:"security"`
 
 	// Redis 缓存与限流配置
@@ -157,8 +160,9 @@ var (
 	modelConfigMu    sync.RWMutex            // 保护缓存并发安全的读写锁
 )
 
-// GetModel 根据名称获取特定的模型配置（并发安全）
-// 如果请求的模型不存在，将返回一个空的 ModelConfig 结构体指针，防止调用方出现空指针异常（Panic）。
+// GetModel 并发安全地按名称获取模型配置。
+// 缓存未初始化或模型不存在时返回空的 ModelConfig 指针而非 nil，
+// 防止调用方空指针异常，同时仍按未命中口径记录缓存统计。
 func GetModel(modelName string) *ModelConfig {
 	modelConfigMu.RLock()
 	if modelConfigCache == nil {
@@ -226,6 +230,7 @@ func InitModelConfig() {
 	modelConfigCache = make(map[string]*ModelConfig)
 
 	for name, cfg := range Global.Models {
+		// 拷贝后取地址：range 变量会被复用，直接取 &cfg 会导致缓存项指向同一个变量。
 		tmp := cfg
 		modelConfigCache[name] = &tmp
 	}
@@ -248,6 +253,7 @@ func UpdateModelConfig(modelName string, cfg ModelConfig) {
 	}
 	Global.Models[modelName] = cfg
 
+	// 拷贝后存指针，让缓存与 Global.Models 各持独立副本，避免共享同一地址被意外修改。
 	tmp := cfg
 	modelConfigCache[modelName] = &tmp
 }

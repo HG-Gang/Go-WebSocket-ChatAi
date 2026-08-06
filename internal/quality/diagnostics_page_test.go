@@ -1,3 +1,6 @@
+// internal/quality/diagnostics_page_test.go
+// 诊断页（web/diagnostics.html）质量测试：锁定用户身份/真实 IP/位置、cached/reasoning
+// token 快照与 stats resources 资源图等展示逻辑，防止页面回退到旧的 Web metrics 数据源。
 package quality_test
 
 import (

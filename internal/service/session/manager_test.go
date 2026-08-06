@@ -1,3 +1,5 @@
+// internal/service/session/manager_test.go
+// 会话管理器单元测试：验证所在地信息序列化与空值边界。
 package session
 
 import (

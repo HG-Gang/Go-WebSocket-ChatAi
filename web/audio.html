@@ -1,3 +1,9 @@
+<!--
+web/audio.html
+页面功能：语音对话测试页，采集浏览器麦克风音频经 Realtime WebSocket 上行，播放 AI 返回的音频下行，实时展示连接状态、波形、音量、转写文本与对话记录，验证语音链路音频上下行与延迟。
+依赖接口/资源：theme.js；/test/generate-token；WS 连接 /ws/realtime/openai（可切 azure）。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；录音仅在页面内实时处理，不上传本地存储、不持久化。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>

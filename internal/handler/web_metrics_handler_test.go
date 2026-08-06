@@ -1,3 +1,5 @@
+// internal/handler/web_metrics_handler_test.go
+// Web 看板指标处理器测试：锁定窗口聚合边界、统一 stats 双写、审计事件与 API key 脱敏落盘行为。
 package handler
 
 import (

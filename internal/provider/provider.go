@@ -1,14 +1,10 @@
 // internal/provider/provider.go
-// Provider 工厂模式核心文件：
-// 1. 定义 Provider 接口（所有模型必须实现）
-// 2. 提供工厂注册表和工厂方法
-// 3. 通过 init() + Register() 实现自动注册
+// 文件功能：定义 Provider 接口并维护模型工厂注册表。输入为模型名称与 conf.ModelConfig，
+// 输出为 Provider 实例；模型未启用或未注册时返回 nil，由调用方负责失败处理。
+// 不负责：具体模型协议实现（WS 转发、HTTP 降级等由各模型包实现）。
 //
-// 使用方式：
-//
-//	各模型包（如 openai）在 init.go 中调用 Register() 注册工厂函数，
-//	main.go 中通过 _ "TozoAI-Chat-Api/internal/provider/openai" 触发 init()，
-//	业务代码调用 provider.Create("openai") 获取实例。
+// 注册机制：各模型包（如 openai、azureai）在 init() 中调用 Register() 注册工厂函数，
+// main.go 通过空导入 "_" 触发 init()，业务代码调用 provider.Create("openai") 获取实例。
 package provider
 
 import (
@@ -63,6 +59,8 @@ var factories = make(map[string]ProviderFactory)
 // 参数：
 //   - name: 模型名称（与配置文件中 models.{name} 对应）
 //   - factory: 工厂函数
+//
+// 同名重复注册会覆盖旧工厂，各模型包之间应保证名称唯一。
 func Register(name string, factory ProviderFactory) {
 	factories[name] = factory
 }
@@ -77,24 +75,26 @@ func Register(name string, factory ProviderFactory) {
 // 参数：name - 模型名称（如 "openai"）
 // 返回：Provider 实例（nil 表示模型未启用或未注册）
 func Create(name string) Provider {
-	// 获取模型配置
+	// 从全局配置取模型配置后进入统一创建链路，保证与 CreateWithConfig 行为一致。
 	cfg := conf.GetModel(name)
 	return CreateWithConfig(name, cfg)
 }
 
 // CreateWithConfig 使用调用方提供的模型配置创建 Provider。
 // 适用于单次连接临时覆盖上游地址、API Key 或模型，不写回全局配置。
+// 配置为 nil 或未启用时返回 nil 失败关闭，调用方必须显式处理 nil。
 func CreateWithConfig(name string, cfg *conf.ModelConfig) Provider {
 	if cfg == nil || !cfg.Enabled {
-		return nil // 模型未配置或未启用
+		return nil // 失败关闭：配置缺失或未启用的模型不能创建实例
 	}
 
-	// 查找工厂函数
+	// 工厂未注册说明对应模型包未被导入（main.go 缺少空导入），
+	// 返回 nil 让调用方显式失败，而不是在运行时 panic。
 	factory, ok := factories[name]
 	if !ok {
-		return nil // 模型未注册工厂函数（可能忘记在 main.go 导入对应包）
+		return nil
 	}
 
-	// 调用工厂函数创建实例
+	// 工厂函数由各模型包的 init() 注册，此处统一以同一份配置创建实例。
 	return factory(cfg)
 }

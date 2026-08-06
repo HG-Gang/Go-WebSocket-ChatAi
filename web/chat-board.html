@@ -1,67 +1,293 @@
+<!--
+web/chat-board.html
+页面功能：多模型聊天 + 请求看板调试页，支持图片/PDF/文本附件上传与粘贴、SSE 流式或 JSON 聊天，展示持久化请求明细列表（可筛选分页、自定义列）与 token/费用/状态 ECharts 统计图表，桌面/平板/手机自适应。
+依赖接口/资源：chat-board.js、style.css、theme.js、ECharts CDN；/test/generate-token；/api/web/models、/api/web/upload、/api/web/chat、/api/web/requests、/api/web/requests/stats。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；Token 获取、附件上传与聊天请求均经服务端鉴权和校验，API Key 仅脱敏显示在记录中。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>TozoAI 聊天看板</title>
-    <link rel="stylesheet" href="style.css?v=20260719-chat-board">
+    <link rel="stylesheet" href="style.css?v=20260719-chat-board-rwd">
     <script src="/web/theme.js?v=20260607-theme" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
     <style>
-        .container { max-width: 1600px; }
-        .nav a { color: var(--accent-blue); text-decoration: none; margin: 0 8px; font-size: 13px; }
-        .layout { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; align-items: start; }
-        @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
-        .chat-panel { display: flex; flex-direction: column; min-height: 720px; }
-        .chat-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 12px; }
-        .chat-toolbar .form-group { flex: 1; min-width: 140px; margin: 0; }
-        .messages {
-            flex: 1; min-height: 420px; max-height: 520px; overflow: auto;
-            background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+        /* ===== 多端自适应：桌面双栏 / 平板堆叠 / 手机分区切换 ===== */
+        html { -webkit-text-size-adjust: 100%; }
+        body {
+            overflow-x: hidden;
+            padding-bottom: env(safe-area-inset-bottom, 0);
         }
-        .msg { margin-bottom: 12px; max-width: 92%; }
+        .container {
+            max-width: min(1600px, 100%);
+            width: 100%;
+            padding: 16px;
+            padding-left: max(16px, env(safe-area-inset-left));
+            padding-right: max(16px, env(safe-area-inset-right));
+            box-sizing: border-box;
+        }
+        .header { padding: 16px 0; margin-bottom: 16px; }
+        .header h1 { font-size: clamp(18px, 4vw, 24px); word-break: break-word; }
+        .subtitle { font-size: clamp(12px, 2.8vw, 14px); padding: 0 4px; }
+        .nav {
+            display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 10px;
+            margin-top: 8px;
+        }
+        .nav a {
+            color: var(--accent-blue); text-decoration: none; font-size: 13px;
+            padding: 4px 2px;
+        }
+        .theme-switcher { flex-wrap: wrap; justify-content: center; }
+
+        /* 手机端主视图切换：聊天 | 看板 */
+        .view-switch {
+            display: none;
+            gap: 8px;
+            margin-bottom: 12px;
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            background: var(--bg-primary);
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .view-switch .view-btn {
+            flex: 1;
+            min-height: 40px;
+            font-weight: 600;
+        }
+        .view-switch .view-btn.active {
+            background: #238636;
+            border-color: #2ea043;
+            color: #fff;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+            gap: 16px;
+            align-items: stretch;
+        }
+        .layout > .panel { min-width: 0; } /* 防止 grid 子项撑破 */
+
+        .auth-panel .form-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .chat-panel {
+            display: flex;
+            flex-direction: column;
+            min-height: min(78vh, 860px);
+        }
+        .chat-toolbar {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .chat-toolbar .form-group { margin: 0; min-width: 0; }
+        .chat-toolbar select,
+        .chat-toolbar input { width: 100%; max-width: 100%; }
+
+        .messages {
+            flex: 1 1 auto;
+            min-height: 240px;
+            max-height: min(48vh, 520px);
+            overflow: auto;
+            -webkit-overflow-scrolling: touch;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .msg { margin-bottom: 12px; max-width: min(92%, 640px); }
         .msg.user { margin-left: auto; }
         .msg .bubble {
-            padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word;
+            padding: 10px 12px; border-radius: 10px;
+            white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
             font-size: 14px; line-height: 1.55;
         }
         .msg.user .bubble { background: #1f6feb33; border: 1px solid var(--accent-blue); }
         .msg.assistant .bubble { background: var(--bg-tertiary); border: 1px solid var(--border); }
-        .msg.system .bubble { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); font-size: 12px; }
+        .msg.system .bubble {
+            background: transparent; color: var(--text-muted);
+            border: 1px dashed var(--border); font-size: 12px;
+        }
         .msg .meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
         .msg .err { color: var(--accent-red); font-size: 12px; margin-top: 4px; }
+
         .attach-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
         .attach-chip {
-            font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border);
-            background: var(--bg-tertiary); display: inline-flex; gap: 6px; align-items: center;
+            font-size: 12px; padding: 4px 8px; border-radius: 999px;
+            border: 1px solid var(--border); background: var(--bg-tertiary);
+            display: inline-flex; gap: 6px; align-items: center;
+            max-width: 100%; word-break: break-all;
         }
-        .attach-chip button { border: 0; background: transparent; color: var(--accent-red); cursor: pointer; }
+        .attach-chip button {
+            border: 0; background: transparent; color: var(--accent-red);
+            cursor: pointer; min-width: 28px; min-height: 28px;
+        }
+
         .composer { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-        .composer textarea { min-height: 88px; }
-        .composer-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .composer textarea {
+            min-height: 88px; width: 100%; max-width: 100%;
+            resize: vertical; box-sizing: border-box;
+        }
+        .composer-actions {
+            display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+        }
+        .composer-actions .btn { min-height: 36px; }
+        .composer-actions .stream-label {
+            font-size: 12px; color: var(--text-secondary);
+            display: inline-flex; align-items: center; gap: 4px;
+        }
+
         .detail-box {
             margin-top: 12px; background: var(--bg-primary); border: 1px solid var(--border);
-            border-radius: 8px; padding: 12px; font-family: var(--font-mono); font-size: 12px;
-            max-height: 220px; overflow: auto; white-space: pre-wrap;
+            border-radius: 8px; padding: 12px; font-family: var(--font-mono);
+            font-size: 12px; max-height: 220px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+            -webkit-overflow-scrolling: touch;
         }
-        .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+
+        .board-panel { min-height: min(78vh, 860px); }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        .tabs .tab-btn { flex: 1 1 auto; min-height: 36px; }
         .tab-btn.active { border-color: var(--accent-blue); color: var(--accent-blue); }
-        .filters { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
-        @media (max-width: 900px) { .filters { grid-template-columns: 1fr 1fr; } }
-        .col-picker { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0 12px; font-size: 12px; color: var(--text-secondary); }
-        .col-picker label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
-        .req-table-wrap { overflow: auto; max-height: 360px; border: 1px solid var(--border); border-radius: 8px; }
-        table.req-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font-mono); }
-        table.req-table th, table.req-table td { border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; white-space: nowrap; }
-        table.req-table th { position: sticky; top: 0; background: var(--bg-tertiary); z-index: 1; }
+
+        .filters {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .filters .form-group { min-width: 0; }
+        .filters input, .filters select { width: 100%; max-width: 100%; box-sizing: border-box; }
+
+        .col-picker {
+            display: flex; flex-wrap: wrap; gap: 8px 12px;
+            margin: 8px 0 12px; font-size: 12px; color: var(--text-secondary);
+            max-height: 120px; overflow: auto; -webkit-overflow-scrolling: touch;
+        }
+        .col-picker label {
+            display: inline-flex; align-items: center; gap: 4px;
+            cursor: pointer; min-height: 28px;
+        }
+
+        .req-table-wrap {
+            overflow: auto;
+            max-height: min(42vh, 400px);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            -webkit-overflow-scrolling: touch;
+            /* 提示可横向滑动 */
+            overscroll-behavior-x: contain;
+        }
+        table.req-table {
+            width: 100%; min-width: 640px; border-collapse: collapse;
+            font-size: 12px; font-family: var(--font-mono);
+        }
+        table.req-table th, table.req-table td {
+            border-bottom: 1px solid var(--border);
+            padding: 8px 10px; text-align: left; white-space: nowrap;
+        }
+        table.req-table th {
+            position: sticky; top: 0; background: var(--bg-tertiary); z-index: 1;
+        }
         table.req-table tr:hover { background: var(--bg-tertiary); cursor: pointer; }
         table.req-table tr.selected { outline: 1px solid var(--accent-blue); }
-        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
-        .chart-box { height: 260px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; }
-        .pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+
+        .charts {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .chart-box {
+            height: clamp(200px, 32vw, 280px);
+            min-height: 200px;
+            width: 100%;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .chart-box.wide { grid-column: 1 / -1; }
+
+        .pager {
+            display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+            margin-top: 8px; font-size: 13px; color: var(--text-secondary);
+        }
+        .pager .btn { min-height: 36px; }
         .status-ok { color: var(--accent-green); }
         .status-fail { color: var(--accent-red); }
+
+        .btn-group { flex-wrap: wrap; }
+        .btn { touch-action: manipulation; }
+
+        /* —— 平板：单列堆叠 —— */
+        @media (max-width: 1100px) {
+            .layout { grid-template-columns: 1fr; gap: 12px; }
+            .auth-panel .form-grid { grid-template-columns: 1fr 1fr; }
+            .chat-panel, .board-panel { min-height: 0; }
+            .messages { max-height: min(40vh, 420px); }
+        }
+
+        /* —— 手机：主视图切换 + 全宽控件 —— */
+        @media (max-width: 768px) {
+            .container { padding: 10px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+            .header { padding: 12px 0; margin-bottom: 10px; }
+            .panel { padding: 12px; margin-bottom: 12px; border-radius: 10px; }
+            .panel h2 { font-size: 15px; margin-bottom: 10px; }
+
+            .view-switch { display: flex; }
+            .layout { gap: 0; }
+            /* 手机默认只显示一个主区，由 body[data-view] 控制 */
+            body[data-view="chat"] .board-panel { display: none !important; }
+            body[data-view="board"] .chat-panel { display: none !important; }
+            body[data-view="board"] .auth-panel { display: none; }
+
+            .auth-panel .form-grid { grid-template-columns: 1fr; }
+            .chat-toolbar { grid-template-columns: 1fr; }
+            .filters { grid-template-columns: 1fr; }
+            .charts { grid-template-columns: 1fr; }
+            .chart-box { height: 220px; }
+            .chart-box.wide { grid-column: auto; }
+
+            .messages {
+                min-height: 200px;
+                max-height: calc(100dvh - 340px);
+                max-height: calc(100vh - 340px);
+            }
+            .composer textarea { min-height: 72px; font-size: 16px; } /* 防 iOS 聚焦缩放 */
+            .chat-toolbar select,
+            .chat-toolbar input,
+            .filters input,
+            .filters select,
+            #token, #user-id, #token-api { font-size: 16px; }
+
+            .composer-actions { gap: 6px; }
+            .composer-actions .btn { flex: 1 1 calc(50% - 6px); }
+            .composer-actions .btn-primary { flex: 1 1 100%; order: -1; }
+            .detail-box { max-height: 160px; font-size: 11px; }
+            .req-table-wrap { max-height: min(50vh, 360px); }
+            table.req-table { font-size: 11px; min-width: 560px; }
+            .col-picker { max-height: 88px; }
+            .nav a { font-size: 12px; }
+        }
+
+        @media (max-width: 420px) {
+            .msg { max-width: 96%; }
+            .msg .bubble { font-size: 13px; padding: 8px 10px; }
+            .pager { justify-content: space-between; width: 100%; }
+            #page-info { flex: 1; text-align: center; font-size: 12px; }
+        }
+
+        /* 横屏手机：消息区略增高 */
+        @media (max-width: 900px) and (orientation: landscape) {
+            .messages { max-height: min(50vh, 280px); }
+            .view-switch { position: static; }
+        }
     </style>
 </head>
 <body>
@@ -88,20 +314,20 @@
         </div>
     </header>
 
-    <section class="panel">
+    <section class="panel auth-panel">
         <h2>鉴权</h2>
         <div class="form-grid">
             <div class="form-group">
                 <label for="user-id">用户 ID</label>
-                <input type="text" id="user-id" value="1001">
+                <input type="text" id="user-id" value="1001" autocomplete="username">
             </div>
             <div class="form-group">
                 <label for="token">JWT Token</label>
-                <input type="text" id="token" placeholder="留空可自动获取">
+                <input type="text" id="token" placeholder="留空可自动获取" autocomplete="off">
             </div>
             <div class="form-group">
                 <label for="token-api">Token 接口</label>
-                <input type="text" id="token-api" value="">
+                <input type="text" id="token-api" value="" inputmode="url">
             </div>
         </div>
         <div class="btn-group">
@@ -110,8 +336,13 @@
         </div>
     </section>
 
+    <div class="view-switch" id="view-switch" role="tablist" aria-label="主视图切换">
+        <button type="button" class="btn view-btn active" data-view="chat" id="btn-view-chat">聊天</button>
+        <button type="button" class="btn view-btn" data-view="board" id="btn-view-board">数据看板</button>
+    </div>
+
     <div class="layout">
-        <section class="panel chat-panel">
+        <section class="panel chat-panel" id="chat-panel">
             <h2>聊天</h2>
             <div class="chat-toolbar">
                 <div class="form-group">
@@ -141,14 +372,14 @@
                     <button class="btn btn-sm" id="btn-upload" type="button">上传附件</button>
                     <button class="btn btn-primary" id="btn-send" type="button">发送</button>
                     <button class="btn btn-sm" id="btn-clear-chat" type="button">清空会话</button>
-                    <label style="font-size:12px;color:var(--text-secondary);"><input type="checkbox" id="use-stream" checked> SSE 流式</label>
+                    <label class="stream-label"><input type="checkbox" id="use-stream" checked> SSE 流式</label>
                 </div>
             </div>
             <h3 style="margin-top:14px;font-size:14px;">本次请求详情</h3>
             <pre class="detail-box" id="request-detail">暂无</pre>
         </section>
 
-        <section class="panel">
+        <section class="panel board-panel" id="board-panel">
             <h2>数据看板</h2>
             <div class="tabs">
                 <button class="btn btn-sm tab-btn active" data-tab="list" type="button">请求列表</button>
@@ -221,12 +452,12 @@
                     <div class="chart-box" id="chart-tokens"></div>
                     <div class="chart-box" id="chart-cost"></div>
                     <div class="chart-box" id="chart-status"></div>
-                    <div class="chart-box" id="chart-ft" style="grid-column:1/-1;"></div>
+                    <div class="chart-box wide" id="chart-ft"></div>
                 </div>
             </div>
         </section>
     </div>
 </div>
-<script src="chat-board.js?v=20260719-chat-board"></script>
+<script src="chat-board.js?v=20260719-chat-board-rwd"></script>
 </body>
 </html>

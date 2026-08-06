@@ -1,4 +1,13 @@
-// Package requestlog 持久化 Web 聊天/看板请求明细（SQLite/MySQL）。
+// internal/service/requestlog/store.go
+// Web 聊天/看板请求明细持久化存储（SQLite，MySQL 预留）：
+// - 负责 web_request_logs 表的建表迁移、明细写入、分页查询与图表聚合
+// - 输入：调用方组装好的 Record / ListFilter
+// - 输出：带 id 的 Record、分页结果（items+total）、StatsResult 聚合
+//
+// 明确不负责：
+// - 明细的采集与组装（由 handler/provider 调用方完成）
+// - APIKey 脱敏：api_key_masked 列只存调用方传入的掩码值，本层不保存明文
+// - 跨进程共享：连接句柄为进程内单例，多实例各自落库
 package requestlog
 
 import (
@@ -70,12 +79,12 @@ type StatsBucket struct {
 
 // StatsResult 看板图表数据。
 type StatsResult struct {
-	Timeline   []StatsBucket            `json:"timeline"`
-	ByModel    []map[string]any         `json:"by_model"`
-	ByStatus   []map[string]any         `json:"by_status"`
-	CostByModel []map[string]any        `json:"cost_by_model"`
-	FirstToken []map[string]any         `json:"first_token"`
-	Summary    map[string]any           `json:"summary"`
+	Timeline    []StatsBucket    `json:"timeline"`
+	ByModel     []map[string]any `json:"by_model"`
+	ByStatus    []map[string]any `json:"by_status"`
+	CostByModel []map[string]any `json:"cost_by_model"`
+	FirstToken  []map[string]any `json:"first_token"`
+	Summary     map[string]any   `json:"summary"`
 }
 
 var (
@@ -85,10 +94,12 @@ var (
 
 // Init 初始化数据库。driver 支持 sqlite；mysql 预留（需 dsn）。
 func Init(enabled bool, driver, dsn string) error {
+	// 未启用时直接返回 nil，调用方无需区分"未启用"与"已初始化"。
 	if !enabled {
 		return nil
 	}
 	driver = strings.TrimSpace(strings.ToLower(driver))
+	// driver 留空默认 sqlite；非 sqlite 驱动缺少 dsn 时失败关闭，避免误用错误驱动。
 	if driver == "" {
 		driver = "sqlite"
 	}
@@ -100,13 +111,14 @@ func Init(enabled bool, driver, dsn string) error {
 		}
 	}
 	if driver == "sqlite" {
+		// modernc.org/sqlite 直接用文件路径作为 DSN，需提前确保父目录存在；
+		// 目录创建失败不阻断后续 Open，最终以 Open 报错为准。
 		if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil && filepath.Dir(dsn) != "." {
-			// dsn 可能是相对文件名无目录
+			// dsn 可能是相对文件名无目录，此时落到默认 data 目录。
 			_ = os.MkdirAll("data", 0o755)
 		}
-		// modernc sqlite DSN 直接用文件路径
+		// 含 mode= 的 DSN 视为内存库等特殊用法，无需创建父目录。
 		if !strings.Contains(dsn, "mode=") {
-			// ensure parent exists
 			dir := filepath.Dir(dsn)
 			if dir != "" && dir != "." {
 				_ = os.MkdirAll(dir, 0o755)
@@ -123,10 +135,12 @@ func Init(enabled bool, driver, dsn string) error {
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
+	// SQLite 单写者模型下限制连接池规模，避免并发写放大。
 	conn.SetMaxOpenConns(8)
 	conn.SetMaxIdleConns(4)
 	conn.SetConnMaxLifetime(time.Hour)
 
+	// sql.Open 不实际建连，Ping 失败时关闭连接并失败关闭，防止带病启动。
 	if err := conn.Ping(); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("ping db: %w", err)
@@ -136,6 +150,7 @@ func Init(enabled bool, driver, dsn string) error {
 		return err
 	}
 
+	// 新连接全部就绪后才替换全局句柄，替换期间旧连接仍可用。
 	dbMu.Lock()
 	if global != nil {
 		_ = global.Close()
@@ -163,7 +178,7 @@ func Enabled() bool {
 }
 
 func migrate(conn *sql.DB, driver string) error {
-	// SQLite 兼容 DDL；MySQL 亦可接受 INTEGER/REAL/TEXT
+	// DDL 兼容 SQLite 与 MySQL：SQLite 用 AUTOINCREMENT/REAL，MySQL 在下方替换为 BIGINT/DOUBLE。
 	ddl := `
 CREATE TABLE IF NOT EXISTS web_request_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,6 +214,7 @@ CREATE INDEX IF NOT EXISTS idx_web_req_config ON web_request_logs(model_config);
 CREATE INDEX IF NOT EXISTS idx_web_req_request_id ON web_request_logs(request_id);
 `
 	if driver == "mysql" {
+		// MySQL 主键自增与浮点类型与 SQLite 不同，做最小差异替换，其余列保持兼容。
 		ddl = strings.ReplaceAll(ddl, "INTEGER PRIMARY KEY AUTOINCREMENT", "BIGINT PRIMARY KEY AUTO_INCREMENT")
 		ddl = strings.ReplaceAll(ddl, "REAL", "DOUBLE")
 	}
@@ -207,6 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_web_req_request_id ON web_request_logs(request_id
 }
 
 // Insert 写入一条请求明细，返回带 id 的记录。
+// APIKey 字段按调用方约定传入掩码值（落 api_key_masked 列），本层不负责脱敏。
 func Insert(ctx context.Context, rec Record) (Record, error) {
 	dbMu.RLock()
 	conn := global
@@ -214,6 +231,7 @@ func Insert(ctx context.Context, rec Record) (Record, error) {
 	if conn == nil {
 		return rec, fmt.Errorf("requestlog db not initialized")
 	}
+	// 调用方未提供时间戳时用当前时间兜底，保证 created_at 恒有值。
 	now := time.Now()
 	if rec.Timestamp == 0 {
 		rec.Timestamp = now.UnixMilli()
@@ -249,6 +267,7 @@ func List(ctx context.Context, f ListFilter) (items []Record, total int64, err e
 	if conn == nil {
 		return nil, 0, fmt.Errorf("requestlog db not initialized")
 	}
+	// 分页参数兜底：默认第 1 页每页 20 条，单页上限 200，防止超大请求拖垮 SQLite。
 	if f.Page < 1 {
 		f.Page = 1
 	}
@@ -260,6 +279,7 @@ func List(ctx context.Context, f ListFilter) (items []Record, total int64, err e
 	}
 
 	where, args := buildWhere(f)
+	// 先查总数再查明细，供前端分页组件使用；两处查询共用同一过滤条件。
 	countSQL := "SELECT COUNT(1) FROM web_request_logs" + where
 	if err = conn.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -307,6 +327,7 @@ func Stats(ctx context.Context, period string, f ListFilter) (*StatsResult, erro
 	var from time.Time
 	var bucketLayout string
 	var bucketMs int64
+	// day 为当天零点起按小时分桶，week/month 为滚动 7/30 天按日期分桶；未知 period 回退到 day。
 	switch strings.ToLower(period) {
 	case "week":
 		from = now.AddDate(0, 0, -7)
@@ -346,7 +367,8 @@ FROM web_request_logs` + where + ` ORDER BY created_at ASC`
 	modelMap := map[string]*StatsBucket{}
 	statusMap := map[string]int64{}
 	costMap := map[string]float64{}
-	// first token buckets: 0-200,200-500,500-1000,1000-2000,2000+
+	// 首 token 时延分桶（单位毫秒）：0-200 / 200-500 / 500-1000 / 1000-2000 / 2000+，
+	// 最后桶用 1<<62 表示无上限。
 	ftBuckets := []struct {
 		name string
 		max  int64
@@ -355,7 +377,7 @@ FROM web_request_logs` + where + ` ORDER BY created_at ASC`
 		{"200-500ms", 500},
 		{"500-1000ms", 1000},
 		{"1000-2000ms", 2000},
-		{"2000ms+", 1<<62},
+		{"2000ms+", 1 << 62},
 	}
 	ftCounts := make([]int64, len(ftBuckets))
 
@@ -373,11 +395,12 @@ FROM web_request_logs` + where + ` ORDER BY created_at ASC`
 			return nil, err
 		}
 		t := time.UnixMilli(r.Timestamp)
+		// 桶内 key 用固定格式字符串（小时对齐到 "15:00"），保证后续可按字典序排序。
 		var key string
 		if bucketMs >= 24*60*60*1000 {
 			key = t.Format(bucketLayout)
 		} else {
-			// hour bucket for day
+			// day 视图按小时整点对齐。
 			key = t.Format("15:00")
 		}
 		tb := timelineMap[key]
@@ -438,13 +461,12 @@ FROM web_request_logs` + where + ` ORDER BY created_at ASC`
 		return nil, err
 	}
 
-	// sort timeline keys
+	// 时间线 key 固定为日期或整点字符串，字典序即时间序，用插入排序即可满足小规模排序。
 	timeline := make([]StatsBucket, 0, len(timelineMap))
 	keys := make([]string, 0, len(timelineMap))
 	for k := range timelineMap {
 		keys = append(keys, k)
 	}
-	// simple insertion sort by key string (hour/day formats sort lexicographically OK for fixed formats)
 	for i := 0; i < len(keys); i++ {
 		for j := i + 1; j < len(keys); j++ {
 			if keys[j] < keys[i] {
@@ -459,14 +481,14 @@ FROM web_request_logs` + where + ` ORDER BY created_at ASC`
 	byModel := make([]map[string]any, 0, len(modelMap))
 	for _, m := range modelMap {
 		byModel = append(byModel, map[string]any{
-			"name":              m.Key,
-			"requests":          m.Requests,
-			"input_tokens":      m.InputTokens,
-			"output_tokens":     m.OutputTokens,
+			"name":                m.Key,
+			"requests":            m.Requests,
+			"input_tokens":        m.InputTokens,
+			"output_tokens":       m.OutputTokens,
 			"cached_input_tokens": m.CachedTokens,
-			"reasoning_tokens":  m.ReasoningTokens,
-			"total_tokens":      m.TotalTokens,
-			"total_cost":        m.TotalCost,
+			"reasoning_tokens":    m.ReasoningTokens,
+			"total_tokens":        m.TotalTokens,
+			"total_cost":          m.TotalCost,
 		})
 	}
 	byStatus := make([]map[string]any, 0, len(statusMap))
@@ -492,19 +514,21 @@ FROM web_request_logs` + where + ` ORDER BY created_at ASC`
 		CostByModel: costByModel,
 		FirstToken:  firstToken,
 		Summary: map[string]any{
-			"period":            period,
-			"requests":          sumReq,
-			"input_tokens":      sumIn,
-			"output_tokens":     sumOut,
+			"period":              period,
+			"requests":            sumReq,
+			"input_tokens":        sumIn,
+			"output_tokens":       sumOut,
 			"cached_input_tokens": sumCached,
-			"reasoning_tokens":  sumReason,
-			"total_tokens":      sumTotal,
-			"total_cost":        sumCost,
-			"avg_latency_ms":    avgLat,
+			"reasoning_tokens":    sumReason,
+			"total_tokens":        sumTotal,
+			"total_cost":          sumCost,
+			"avg_latency_ms":      avgLat,
 		},
 	}, nil
 }
 
+// buildWhere 根据过滤条件拼装 WHERE 子句。
+// 全部使用参数化占位符，过滤值只进参数不进 SQL 文本，防止注入。
 func buildWhere(f ListFilter) (string, []any) {
 	parts := make([]string, 0, 8)
 	args := make([]any, 0, 8)

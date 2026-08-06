@@ -1,3 +1,9 @@
+<!--
+web/chat.html
+页面功能：TozoAI 项目助手调试页，通过 Realtime WebSocket 与 workspace 工具浏览项目目录、读取文件，AI 的写文件请求以 diff 卡片展示并等待用户确认后提交（pending write），右侧展示原始事件与 token 统计图表。
+依赖接口/资源：theme.js；/test/generate-token；/api/workspace/projects、/api/workspace/list、/api/workspace/write/confirm、/api/workspace/write/reject；WS 连接 /ws/realtime/openai。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；文件写入必须由用户在页面确认，路径逃逸、敏感文件与二进制限制由 Go 服务端再次校验。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>

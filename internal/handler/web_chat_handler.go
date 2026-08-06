@@ -1,3 +1,16 @@
+// internal/handler/web_chat_handler.go
+// Web 聊天看板统一入口：附件上传、统一聊天（Responses 形状）与请求明细/聚合统计。
+//
+// 文件功能：
+//   - WebUploadHandler: 接收图片/PDF/文本附件，校验大小与类型后落盘并登记进程内索引。
+//   - WebChatHandler: 按 model_config 路由到兼容 /v1/responses 的模型配置，支持 SSE 流式返回。
+//   - WebRequestsHandler / WebRequestStatsHandler: 读取请求日志明细与聚合统计（依赖 DB 开启）。
+//
+// 安全边界：
+//   - 上传体受 MaxBytesReader 与显式大小双重限制（默认 10MB），类型不在白名单内直接拒绝。
+//   - 附件文本最多抽取 webChatMaxPDFChars 个字符，PDF 用启发式抽取、不引入外部解析库。
+//   - 聊天入口要求模型已启用且 api_key/endpoint 已配置，否则失败关闭（400）。
+//   - 错误信息统一经 RedactField 脱敏后才返回给调用方。
 package handler
 
 import (
@@ -54,14 +67,19 @@ type attachmentMeta struct {
 	UserID    string `json:"-"`
 }
 
+// attachmentStore 上传附件进程内索引：id -> 元数据；文件本体保存在磁盘，
+// 聊天时按 attachment_id 找回文件路径与预抽取文本。
 var attachmentStore = struct {
-	mu    sync.RWMutex
+	mu sync.RWMutex
 	// id -> meta；进程内索引，文件在磁盘
 	items map[string]*attachmentMeta
 }{items: map[string]*attachmentMeta{}}
 
 // WebUploadHandler 接收图片/PDF/文本附件。
+// 文件受配置的最大字节数限制（默认 10MB），类型不在白名单内返回 400；
+// text/pdf 成功抽取文本后登记索引并返回元数据，其余类型只保存文件。
 func WebUploadHandler(c *gin.Context) {
+	// 先用 MaxBytesReader 在读取层限制请求体，避免超大文件先完整进入内存。
 	maxBytes := webChatMaxUpload()
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes+1<<20)
 	file, header, err := c.Request.FormFile("file")
@@ -71,6 +89,7 @@ func WebUploadHandler(c *gin.Context) {
 	}
 	defer file.Close()
 
+	// 声明大小与实际读取字节双重校验，防止 Content-Length 伪造。
 	if header.Size > maxBytes {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": fmt.Sprintf("file too large, max %d bytes", maxBytes)})
 		return
@@ -86,6 +105,7 @@ func WebUploadHandler(c *gin.Context) {
 		return
 	}
 
+	// Header 未带 Content-Type 时按内容嗅探；类型不在白名单内直接拒绝（失败关闭）。
 	mime := header.Header.Get("Content-Type")
 	if mime == "" {
 		mime = http.DetectContentType(data)
@@ -96,6 +116,7 @@ func WebUploadHandler(c *gin.Context) {
 		return
 	}
 
+	// 用 UUID 作为磁盘文件名，按年/月分目录存放，避免用户文件名导致路径冲突或注入。
 	id := uuid.NewString()
 	dir := webChatUploadDir()
 	sub := filepath.Join(dir, time.Now().Format("2006"), time.Now().Format("01"))
@@ -123,6 +144,7 @@ func WebUploadHandler(c *gin.Context) {
 		CreatedAt: time.Now().UnixMilli(),
 		UserID:    c.GetString("user_id"),
 	}
+	// text/pdf 需要抽取文本供聊天拼接；抽取失败时删除已落盘文件（失败关闭），不留下孤儿文件。
 	if kind == "text" || kind == "pdf" {
 		text, err := extractAttachmentText(meta, data)
 		if err != nil {
@@ -152,6 +174,7 @@ func WebUploadHandler(c *gin.Context) {
 // WebChatHandler 统一聊天入口：按 model_config 路由到 Responses 等。
 // stream=true 时用 SSE 推送最终结果（一期非真 token 流，封装为 delta+done 闭环，保证前端统一协议）。
 func WebChatHandler(c *gin.Context) {
+	// 请求体需为合法 JSON 对象且至少携带一条消息，否则不进入上游。
 	var req chatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": "invalid JSON: " + err.Error()})
@@ -184,6 +207,7 @@ func WebChatHandler(c *gin.Context) {
 	if strings.TrimSpace(req.Model) != "" {
 		payload["model"] = strings.TrimSpace(req.Model)
 	}
+	// reasoning_effort 为 default 时不透传，避免上游收到无意义的显式默认值。
 	if strings.TrimSpace(req.ReasoningEffort) != "" && req.ReasoningEffort != "default" {
 		payload["reasoning"] = map[string]any{"effort": req.ReasoningEffort}
 	}
@@ -196,6 +220,7 @@ func WebChatHandler(c *gin.Context) {
 		c.JSON(http.StatusNotImplemented, gin.H{"code": 501, "error": msg})
 		return
 	}
+	// 缺少 api_key 或 endpoint 时失败关闭，不允许以半配置状态请求上游。
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error": "model api_key is not configured"})
 		return
@@ -214,6 +239,7 @@ func WebChatHandler(c *gin.Context) {
 	latency := time.Since(start)
 
 	if err != nil {
+		// 失败路径统一返回脱敏摘要并记一条失败指标；SSE 请求通过 error 事件告知前端。
 		errorSummary := logger.RedactField("content", err.Error())
 		record := addResponsesMetric(c, modelConfig, cfg, payload, result, "failed", latency, errorSummary)
 		log.Warn("WebChat 请求失败", zap.Error(err), zap.Duration("latency", latency))
@@ -264,6 +290,7 @@ func WebChatHandler(c *gin.Context) {
 }
 
 // WebRequestsHandler 请求明细列表（DB）。
+// 请求日志库未启用时返回 503；分页与过滤参数（model/model_config/status/provider/q/from/to/page/size）透传给 requestlog。
 func WebRequestsHandler(c *gin.Context) {
 	if !requestlog.Enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 503, "error": "request log db not enabled"})
@@ -300,6 +327,7 @@ func WebRequestsHandler(c *gin.Context) {
 }
 
 // WebRequestStatsHandler 看板聚合。
+// 请求日志库未启用时返回 503；period 与过滤参数透传给 requestlog 做聚合统计。
 func WebRequestStatsHandler(c *gin.Context) {
 	if !requestlog.Enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 503, "error": "request log db not enabled"})
@@ -327,6 +355,9 @@ func WebRequestStatsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 200, "data": stats})
 }
 
+// writeChatSSE 把聊天结果以 SSE 事件流写出。
+// 正常路径按 24 字符分片推送 delta 事件（一期模拟流式，保证前端协议统一），
+// 最后发 done 事件携带完整文本与指标记录；失败路径只发 error 事件后结束。
 func writeChatSSE(c *gin.Context, text, errMsg string, record WebRequestRecord, isErr bool) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -363,6 +394,9 @@ func writeChatSSE(c *gin.Context, text, errMsg string, record WebRequestRecord, 
 	})
 }
 
+// supportsResponsesChat 判断模型配置是否允许走统一 Responses 聊天入口。
+// azureai（type=azure）协议不兼容时返回 false（失败关闭）；其余配置只要有 HTTP
+// endpoint 即允许尝试，最终由上游校验请求是否合法。
 func supportsResponsesChat(modelConfig, providerType string, cfg *conf.ModelConfig) bool {
 	if cfg == nil {
 		return false
@@ -376,6 +410,9 @@ func supportsResponsesChat(modelConfig, providerType string, cfg *conf.ModelConf
 	return strings.TrimSpace(cfg.Endpoint) != ""
 }
 
+// buildChatInput 把统一聊天消息转换为 Responses API 的 input 结构。
+// user 消息转 input_text/input_image，assistant 消息转 output_text；
+// system 角色降级为带 [system] 前缀的 user，避免上游因角色不受支持而报 400。
 func buildChatInput(messages []chatMessage) (any, error) {
 	// Responses API 多轮：user 用 input_*，assistant 用 output_text，避免角色内容类型错误导致上游 400。
 	items := make([]map[string]any, 0, len(messages))
@@ -475,6 +512,8 @@ func buildChatInput(messages []chatMessage) (any, error) {
 	return items, nil
 }
 
+// classifyUpload 按 MIME 与扩展名白名单判定附件类型（image/pdf/text）。
+// 未命中的类型返回 ok=false，由调用方拒绝上传（失败关闭）。
 func classifyUpload(mime, filename string) (kind string, ok bool) {
 	mime = strings.ToLower(strings.TrimSpace(mime))
 	ext := strings.ToLower(filepath.Ext(filename))
@@ -495,6 +534,9 @@ func classifyUpload(mime, filename string) (kind string, ok bool) {
 	return "", false
 }
 
+// extractAttachmentText 抽取 text/pdf 附件的可读文本，统一截断到最大字符数。
+// 非 UTF-8 文本按 latin1 容错处理；PDF 走启发式抽取，抽不到文本时返回错误，
+// 调用方会删除已落盘文件，避免无文本附件进入聊天上下文。
 func extractAttachmentText(meta *attachmentMeta, data []byte) (string, error) {
 	maxChars := webChatMaxPDFChars()
 	switch meta.Kind {
@@ -561,6 +603,7 @@ func extractPDFPlainText(data []byte) string {
 	return strings.TrimSpace(b.String())
 }
 
+// isMostlyPrintable 判断字符串中可打印字符占比是否超过 80%，用于过滤 PDF 抽取噪声。
 func isMostlyPrintable(s string) bool {
 	if s == "" {
 		return false
@@ -574,6 +617,8 @@ func isMostlyPrintable(s string) bool {
 	return float64(ok)/float64(utf8.RuneCountInString(s)) > 0.8
 }
 
+// truncateRunes 按 rune 截断字符串（不切坏多字节字符），超出部分追加截断标记；
+// max 非正数时兜底为 100000 字符。
 func truncateRunes(s string, max int) string {
 	if max <= 0 {
 		max = 100000
@@ -585,6 +630,7 @@ func truncateRunes(s string, max int) string {
 	return string(r[:max]) + "\n...[truncated]"
 }
 
+// extFromMime 在文件名缺少扩展名时按 MIME 推断存储扩展名，未命中时兜底 .bin。
 func extFromMime(mime string) string {
 	switch {
 	case strings.Contains(mime, "png"):
@@ -602,6 +648,7 @@ func extFromMime(mime string) string {
 	}
 }
 
+// webChatMaxUpload 读取上传大小上限（字节）；配置缺失或非正数时兜底为 10MB。
 func webChatMaxUpload() int64 {
 	if conf.Global != nil && conf.Global.WebChat.MaxUploadBytes > 0 {
 		return conf.Global.WebChat.MaxUploadBytes
@@ -609,6 +656,7 @@ func webChatMaxUpload() int64 {
 	return 10 << 20
 }
 
+// webChatMaxPDFChars 读取附件文本抽取的最大字符数；配置缺失或非正数时兜底为 100000。
 func webChatMaxPDFChars() int {
 	if conf.Global != nil && conf.Global.WebChat.MaxPDFChars > 0 {
 		return conf.Global.WebChat.MaxPDFChars
@@ -616,6 +664,7 @@ func webChatMaxPDFChars() int {
 	return 100000
 }
 
+// webChatUploadDir 读取附件存储目录；配置缺失时兜底为 ./data/uploads。
 func webChatUploadDir() string {
 	if conf.Global != nil && strings.TrimSpace(conf.Global.WebChat.UploadDir) != "" {
 		return conf.Global.WebChat.UploadDir
@@ -623,6 +672,8 @@ func webChatUploadDir() string {
 	return "./data/uploads"
 }
 
+// persistRequestLog 把指标记录写入请求日志库（独立后台 DB）。
+// 日志库未开启时静默跳过，不阻塞聊天业务；写入失败仅告警，不把错误抛回调用方。
 func persistRequestLog(c *gin.Context, record WebRequestRecord, modelConfig, requestID string) {
 	if !requestlog.Enabled() {
 		return
@@ -659,6 +710,7 @@ func persistRequestLog(c *gin.Context, record WebRequestRecord, modelConfig, req
 	}
 }
 
+// firstNonEmpty 按顺序返回第一个非空值（去首尾空白），全部为空时返回空串。
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {

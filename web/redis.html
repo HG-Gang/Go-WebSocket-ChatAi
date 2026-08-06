@@ -1,3 +1,9 @@
+<!--
+web/redis.html
+页面功能：Redis 监控面板调试页，轮询 /api/redis/keys 实时查看全部 Key 的类型、TTL 与 JSON 值，展示 Key 总数与计费相关统计，支持自动刷新、模式筛选与关键字查找。
+依赖接口/资源：Layui CDN、theme.js；/api/redis/keys。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；Redis 值可能包含用户数据，仅限本地环境查看，不对外暴露。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>

@@ -1,3 +1,5 @@
+// internal/handler/web_static_handler_test.go
+// /web 静态页处理器测试：锁定主题脚本注入幂等、相对路径归一化和路径穿越拒绝。
 package handler
 
 import (

@@ -1,3 +1,5 @@
+// internal/service/stats/stats_test.go
+// 统一资源统计单元测试：覆盖跨时间窗口聚合、运维事件计数与业务缓存命中统计。
 package stats
 
 import (
