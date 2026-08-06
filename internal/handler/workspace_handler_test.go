@@ -1,3 +1,5 @@
+// internal/handler/workspace_handler_test.go
+// Workspace HTTP 处理器测试：锁定写入确认开启时不直接落盘、确认写盘与拒绝不写盘的安全终态。
 package handler
 
 import (

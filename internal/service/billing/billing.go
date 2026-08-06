@@ -1,19 +1,24 @@
 // internal/service/billing/billing.go
 // 计费服务：Token 消耗统计 + 音频时长统计
 //
-// 功能：
+// 文件功能：
 //   - 记录每个会话的输入/输出 Token 消耗
 //   - 记录不同模块（Chat/Meeting/Translation）的音频时长
-//   - 按模型、用户、模块累计
-//   - Redis 持久化存储
-//   - 全局 billing.enabled 开关控制
+//   - 按模型、用户、模块累计，数据写入 Redis 持久化存储
+//   - 受全局 billing.enabled 开关控制，关闭或 Redis 不可用时静默跳过
+//
+// 明确不负责：
+//   - 鉴权与配额扣减，只做消耗统计
+//   - Redis 写入失败时的补偿重试（失败直接返回错误，由调用方决定处理）
 //
 // Redis Key 设计：
 //
-//	billing:duration:{model}:{module}:{userID}  → Hash（音频时长）
-//	billing:daily_duration:{model}:{date}       → String（每日音频总时长）
-//	billing:{model}:{sessionID}                 → Hash（Token 消耗）
-//	billing:daily:{model}:{date}                → String（每日 Token 总消耗）
+//	billing:duration:{model}:{module}:{userID}        → Hash（音频时长）
+//	billing:daily_duration:{model}:{date}             → String（每日音频总时长）
+//	billing:{model}:{sessionID}                       → Hash（Token 消耗，兼容旧查询）
+//	billing:daily:{model}:{date}                      → String（每日 Token 总消耗）
+//	billing:response:{model}:{sessionID}:{responseID} → Hash（单次 response 明细）
+//	billing:daily_detail:{model}:{date}               → Hash（每日 token/text/audio 汇总）
 package billing
 
 import (
@@ -50,7 +55,7 @@ const (
 //	inputDurationMs  - App 输入音频时长（毫秒）
 //	outputDurationMs - OpenAI 输出音频时长（毫秒）
 func RecordAudioDuration(model, module, userID, sessionID string, inputDurationMs, outputDurationMs int64) error {
-	// 全局计费开关检查
+	// 计费未启用或配置缺失时静默返回，保证统计链路故障不影响对话主流程。
 	if conf.Global == nil || !conf.Global.Billing.Enabled {
 		return nil
 	}
@@ -65,12 +70,12 @@ func RecordAudioDuration(model, module, userID, sessionID string, inputDurationM
 		return nil // Redis 未启用，静默跳过
 	}
 
-	// 用户模块维度 Key：billing:duration:{model}:{module}:{userID}
+	// 用户+模块维度 Hash Key，字段同时承载时长累计与会话统计。
 	userKey := fmt.Sprintf("billing:duration:%s:%s:%s", model, module, userID)
 
 	pipe := client.Pipeline()
 
-	// 累加音频时长
+	// 一次 Pipeline 原子累加输入/输出/总音频时长，并覆盖最近会话统计字段。
 	pipe.HIncrBy(ctx, userKey, "input_audio_ms", inputDurationMs)
 	pipe.HIncrBy(ctx, userKey, "output_audio_ms", outputDurationMs)
 	pipe.HIncrBy(ctx, userKey, "total_audio_ms", inputDurationMs+outputDurationMs)
@@ -80,12 +85,13 @@ func RecordAudioDuration(model, module, userID, sessionID string, inputDurationM
 	pipe.HSet(ctx, userKey, "last_session_id", sessionID)
 	pipe.HSet(ctx, userKey, "last_updated", time.Now().UnixMilli())
 
-	// 每日模型总时长
+	// 每日总时长按模型+日期独立 Key，设置 32 天 TTL，避免只写不读导致内存无限增长。
 	today := time.Now().Format("2006-01-02")
 	dailyKey := fmt.Sprintf("billing:daily_duration:%s:%s", model, today)
 	pipe.IncrBy(ctx, dailyKey, inputDurationMs+outputDurationMs)
 	pipe.Expire(ctx, dailyKey, 32*24*time.Hour)
 
+	// Pipeline 任一命令失败即整体返回错误并记日志；不重试，避免阻塞对话主流程。
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		logger.GetModelLogger(model).Error("记录音频时长失败",
@@ -105,6 +111,7 @@ func RecordAudioDuration(model, module, userID, sessionID string, inputDurationM
 }
 
 // GetUserModuleDuration 查询用户在指定模型+模块下的累计音频时长
+// Redis 未启用时返回全零且不报错，调用方按"尚无数据"处理即可。
 func GetUserModuleDuration(model, module, userID string) (inputMs, outputMs, totalMs int64, err error) {
 	c := redis.GetClient()
 	if c == nil {
@@ -118,6 +125,7 @@ func GetUserModuleDuration(model, module, userID string) (inputMs, outputMs, tot
 		return 0, 0, 0, err
 	}
 
+	// 字段缺失或非数字时 ParseInt 报错被忽略，按 0 累计处理。
 	inputMs, _ = strconv.ParseInt(fields["input_audio_ms"], 10, 64)
 	outputMs, _ = strconv.ParseInt(fields["output_audio_ms"], 10, 64)
 	totalMs, _ = strconv.ParseInt(fields["total_audio_ms"], 10, 64)
@@ -191,6 +199,7 @@ func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDe
 	if client == nil {
 		return nil // Redis 未启用，静默跳过
 	}
+	// 上游未拆分 text/audio 时按输入+输出兜底总量，DetailSource 缺省按 usage_detail 处理。
 	if detail.TotalTokens <= 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	}
@@ -198,9 +207,11 @@ func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDe
 		detail.DetailSource = "usage_detail"
 	}
 
+	// 会话维度累计 Key，与 GetSessionUsage 查询口径一致。
 	keyPrefix := fmt.Sprintf("billing:%s:%s", model, sessionID)
 
 	pipe := client.Pipeline()
+	// 会话 Hash 累计各 token 分项与请求计数，供会话结束后统计与看板展示。
 	pipe.HIncrBy(ctx, keyPrefix, "input_tokens", int64(detail.InputTokens))
 	pipe.HIncrBy(ctx, keyPrefix, "output_tokens", int64(detail.OutputTokens))
 	pipe.HIncrBy(ctx, keyPrefix, "total_tokens", int64(detail.TotalTokens))
@@ -216,6 +227,7 @@ func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDe
 	pipe.HSet(ctx, keyPrefix, "token_detail_source", detail.DetailSource)
 	pipe.HSet(ctx, keyPrefix, "last_used", time.Now().Unix())
 
+	// 每日总账与每日明细双 Key 同时累计，分别服务总消耗与看板图表，均设 32 天 TTL。
 	today := time.Now().Format("2006-01-02")
 	dailyKey := fmt.Sprintf("billing:daily:%s:%s", model, today)
 	pipe.IncrBy(ctx, dailyKey, int64(detail.TotalTokens))
@@ -237,6 +249,7 @@ func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDe
 	pipe.Expire(ctx, dailyDetailKey, 32*24*time.Hour)
 
 	if detail.ResponseID != "" {
+		// 单次 response 明细 Key 只写不读，TTL 到期自动清理，防止无界增长。
 		responseKey := fmt.Sprintf("billing:response:%s:%s:%s", model, sessionID, detail.ResponseID)
 		pipe.HSet(ctx, responseKey, map[string]interface{}{
 			"model":               model,
@@ -258,6 +271,7 @@ func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDe
 		pipe.Expire(ctx, responseKey, 32*24*time.Hour)
 	}
 
+	// Pipeline 任一命令失败即整体返回错误并记日志；不重试，数据缺口由看板感知。
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		logger.GetModelLogger(model).Error("记录 Token 消耗失败",
@@ -277,6 +291,7 @@ func RecordTokenUsageDetail(model, sessionID, userID string, detail TokenUsageDe
 }
 
 // GetSessionUsage 查询指定会话的 Token 累计消耗
+// Redis 未启用时返回全零且不报错，调用方按"尚无数据"处理即可。
 func GetSessionUsage(model, sessionID string) (input, output, total int64, err error) {
 	c := redis.GetClient()
 	if c == nil {
@@ -290,6 +305,7 @@ func GetSessionUsage(model, sessionID string) (input, output, total int64, err e
 		return 0, 0, 0, err
 	}
 
+	// 字段缺失或非数字时 ParseInt 报错被忽略，按 0 累计处理。
 	input, _ = strconv.ParseInt(fields["input_tokens"], 10, 64)
 	output, _ = strconv.ParseInt(fields["output_tokens"], 10, 64)
 	total, _ = strconv.ParseInt(fields["total_tokens"], 10, 64)

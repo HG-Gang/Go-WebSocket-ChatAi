@@ -1,3 +1,14 @@
+// internal/handler/web_metrics_handler.go
+// Web 看板指标处理器：采集 Responses 请求明细并聚合成进程内看板数据。
+//
+// 文件功能：
+//   - addResponsesMetric/addWebRequestRecord：从一次上游 Responses 调用提取指标，写入最近窗口并双写统一 stats 服务。
+//   - WebMetricsHandler：返回窗口内明细、模型/状态/类型分布、分钟时间线和 day/week/month 资源汇总。
+//   - writeWebMetricsDailyLog：把请求明细脱敏后写入当日审计日志，服务重启后仍可回溯。
+//
+// 安全边界：
+//   - APIKey 只保存和展示脱敏值，审计日志经 RedactField 二次脱敏，任何路径都不落明文密钥。
+//   - 窗口数据只用于调试展示，不是长期审计账本；费用结算仍以 billing/Redis 或上游账单为准。
 package handler
 
 import (
@@ -19,6 +30,7 @@ import (
 	"TozoAI-Chat-Api/internal/service/stats"
 )
 
+// maxWebRequestRecords 是窗口内最多保留的请求条数，超出的旧记录会被裁剪。
 const maxWebRequestRecords = 500
 
 // webRequestStats 是 Web 看板的进程内最近请求窗口。
@@ -39,10 +51,12 @@ var webMetricsAudit = struct {
 // APIKey 只保存脱敏值；Error 只保存可展示错误文本，不能写入完整上游密钥或原始敏感请求体。
 type WebRequestRecord struct {
 	ID              int64   `json:"id"`
+	RequestID       string  `json:"request_id,omitempty"`
 	Time            string  `json:"time"`
 	Timestamp       int64   `json:"timestamp"`
 	ModelConfig     string  `json:"model_config"`
 	Model           string  `json:"model"`
+	Provider        string  `json:"provider,omitempty"`
 	InputTokens     int64   `json:"input_tokens"`
 	OutputTokens    int64   `json:"output_tokens"`
 	CachedTokens    int64   `json:"cached_input_tokens"`
@@ -138,6 +152,7 @@ func addWebRequestRecord(record WebRequestRecord) WebRequestRecord {
 // addResponsesMetric 从一次 Responses 调用中提取看板指标。
 // cfg 只用于 endpoint、模型类型、计费配置和脱敏 key；payload/result 可能来自失败请求，因此字段都要允许缺失。
 func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfig, payload map[string]any, result *openairesponses.Result, status string, latency time.Duration, errorText string) WebRequestRecord {
+	// 先归一化 usage 和 model：payload/result 可能来自失败请求，字段全部按缺失兜底，避免看板出现空模型或错误计数。
 	usage := extractResponsesUsage(result)
 	model := payloadString(payload, "model")
 	if model == "" && result != nil {
@@ -147,6 +162,7 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		model = cfg.DefaultModel
 	}
 
+	// 配置侧只取脱敏后的 endpoint 和 api_key，明文密钥不进入窗口记录。
 	endpoint := ""
 	apiKey := "未配置"
 	modelType := inferModelType(modelConfig, "")
@@ -158,10 +174,16 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		billingMode = metricStringFromExtra(cfg.Extra, "billing_mode", "token")
 	}
 
+	reqID := ""
+	if result != nil {
+		reqID = result.ID
+	}
 	totalCost := estimateResponseCost(cfg, usage)
 	record := addWebRequestRecord(WebRequestRecord{
+		RequestID:       reqID,
 		ModelConfig:     modelConfig,
 		Model:           model,
+		Provider:        modelConfig,
 		InputTokens:     usage.Input,
 		OutputTokens:    usage.Output,
 		CachedTokens:    usage.Cached,
@@ -180,6 +202,7 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		UserAgent:       c.GetHeader("User-Agent"),
 		Error:           errorText,
 	})
+	// 双写统一 stats 服务，保证看板图表与 billing/Redis 统计共用同一份消耗口径。
 	stats.RecordUsage(stats.UsageRecord{
 		Source:          stats.SourceResponses,
 		Provider:        modelConfig,
@@ -197,12 +220,15 @@ func addResponsesMetric(c *gin.Context, modelConfig string, cfg *conf.ModelConfi
 		LatencyMs:       record.LatencyMs,
 		Error:           record.Error,
 	})
+	// 双写 DB（若已启用），保证看板跨重启可查
+	persistRequestLog(c, record, modelConfig, record.RequestID)
 	return record
 }
 
 // WebMetricsHandler 返回 Web 看板请求明细、汇总数据和图表数据。
 // 这个接口面向调试页，返回最近窗口的明细和 day/week/month 聚合；它不读取 Redis，也不代表全量历史。
 func WebMetricsHandler(c *gin.Context) {
+	// 在锁内一次性快照窗口记录，遍历和统计都在锁外进行，避免长聚合阻塞 addWebRequestRecord 写入路径。
 	webRequestStats.Lock()
 	records := append([]WebRequestRecord(nil), webRequestStats.Records...)
 	webRequestStats.Unlock()
@@ -349,6 +375,8 @@ func buildResourcePeriod(records []WebRequestRecord, now, start time.Time, bucke
 	}
 }
 
+// emitWebMetricsLog 触发审计事件写入。
+// Event 为空时直接跳过，避免无意义的事件进入日志 sink；测试可替换 sink 拦截事件。
 func emitWebMetricsLog(event webMetricsLogEvent) {
 	if strings.TrimSpace(event.Event) == "" {
 		return
@@ -361,6 +389,8 @@ func emitWebMetricsLog(event webMetricsLogEvent) {
 	}
 }
 
+// writeWebMetricsDailyLog 把审计事件写入全局日志的当日文件。
+// 未配置日志根目录时直接放弃写入，不影响业务；api_key 字段落盘前经 RedactField 再次脱敏，保证日志文件不含明文密钥。
 func writeWebMetricsDailyLog(event webMetricsLogEvent) {
 	if conf.Global == nil || strings.TrimSpace(conf.Global.Logs.RootDir) == "" {
 		return
@@ -396,6 +426,8 @@ func writeWebMetricsDailyLog(event webMetricsLogEvent) {
 	logger.GetModelLogger("global").Info("web metrics audit", fields...)
 }
 
+// setWebMetricsLogSinkForTest 替换审计 sink 并返回恢复函数。
+// 仅测试使用，防止测试输出写入真实日志文件。
 func setWebMetricsLogSinkForTest(sink func(webMetricsLogEvent)) func() {
 	webMetricsAudit.Lock()
 	old := webMetricsAudit.sink

@@ -1,3 +1,7 @@
+// internal/service/workspace/workspace_test.go
+// 文件功能：Workspace 服务（pending 写入生命周期、审计与资源统计）的单元测试。覆盖
+// 预览不落盘、确认落盘、拒绝不落盘、敏感路径拦截、审计日志不泄露文件内容与统计计数。
+// 安全边界：用例统一切换到临时项目根和测试日志目录，并断言审计日志不含文件内容原文。
 package workspace
 
 import (
@@ -157,6 +161,7 @@ func TestWorkspaceWriteAuditLogsPreviewAndConfirm(t *testing.T) {
 	if !strings.Contains(text, "workspace_write_preview") || !strings.Contains(text, "workspace_write_confirmed") {
 		t.Fatalf("audit log = %s, want preview and confirmed events", text)
 	}
+	// 安全断言：审计日志中出现文件内容原文或 diff 行即视为泄露，测试直接失败。
 	for _, forbidden := range []string{"OPENAI_API_KEY=secret", "visible=false", "+OPENAI_API_KEY", secretContent} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("audit log leaked file content or diff %q: %s", forbidden, text)

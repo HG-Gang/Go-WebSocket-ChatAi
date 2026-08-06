@@ -1,3 +1,5 @@
+// internal/provider/openai/config_test.go
+// OpenAIConfig 读取方法单元测试：覆盖 ProxyURL 未配置、已配置、空白裁剪与 nil 接收者兜底四类行为。
 package openai
 
 import (

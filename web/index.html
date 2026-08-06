@@ -1,3 +1,9 @@
+<!--
+web/index.html
+页面功能：WebSocket 调试入口主页，验证 Go 服务与 OpenAI/Azure Realtime 长连接的建立、双端心跳、断线重连与消息收发；实时读取 /api/debug/status 展示服务端 yaml 实际加载的模型与 API Key（脱敏）配置；聚合链路统计并支持按 OpenAI 原生事件做高级 JSON 调试。
+依赖接口/资源：ws-test.js、style.css、theme.js；WS 连接 /ws/realtime/openai（可切 azure）；/test/generate-token；/api/debug/status。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；token 与上游 API Key 输入框仅是本次连接的本地参数，不自动保存，API Key 只以脱敏形式展示。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -14,6 +20,7 @@
             <h1>TozoAI WebSocket 测试面板</h1>
             <p class="subtitle">双端心跳检测 + 断线重连 功能验证工具</p>
             <p style="margin-top:8px;font-size:13px;">
+                <a href="/web/chat-board.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">聊天看板</a> |
                 <a href="/web/audio.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">语音对话测试</a> |
                 <a href="/web/chat.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">聊天看板</a> |
                 <a href="/web/redis.html" target="_blank" rel="noopener noreferrer" style="color:#58a6ff;text-decoration:none;">Redis 监控</a> |

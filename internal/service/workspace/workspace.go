@@ -1,3 +1,9 @@
+// internal/service/workspace/workspace.go
+// 文件功能：Workspace 服务，项目文件访问的唯一底层入口。负责把 project_id 映射到项目根，
+// 提供目录列表、文本文件读取与直接写入；输入为 project_id 和项目内相对路径，输出为可
+// JSON 序列化的 Entry/FileContent，失败时返回显式错误。
+// 安全边界：所有入口统一执行 project_id 校验、路径逃逸防护（resolve）、大小限制、敏感
+// 内容与敏感路径拦截；任一步失败都返回错误而不静默降级，调用方不得把读错误当空内容。
 package workspace
 
 import (
@@ -9,9 +15,6 @@ import (
 	"strings"
 )
 
-// Workspace service 是项目文件访问的唯一底层入口。
-// 所有 HTTP 和模型工具写文件都必须经过这里，统一执行 project_id 校验、路径逃逸防护、
-// 文件大小限制、文本内容限制和敏感路径拦截。
 const (
 	// maxReadBytes 限制前端/模型一次读取的最大文件大小，避免误读大文件拖垮 WebSocket 响应。
 	maxReadBytes = 512 * 1024
@@ -99,6 +102,7 @@ func List(projectID, relPath string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 边读边构建条目，超过 maxListItems 立即停止，避免超大目录的完整 JSON 回传前端。
 	entries := make([]Entry, 0, min(len(items), maxListItems))
 	for _, item := range items {
 		if len(entries) >= maxListItems {
@@ -124,6 +128,7 @@ func List(projectID, relPath string) ([]Entry, error) {
 			Modified: info.ModTime().Format("2006-01-02 15:04:05"),
 		})
 	}
+	// 目录优先、名称不区分大小写排序，保证前端展示顺序稳定，不依赖系统目录顺序。
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Type != entries[j].Type {
 			return entries[i].Type == "dir"
@@ -151,6 +156,7 @@ func Read(projectID, relPath string) (FileContent, error) {
 	if info.IsDir() {
 		return FileContent{}, fmt.Errorf("cannot read directory: %s", displayPath)
 	}
+	// 单位字节：超过 maxReadBytes 的文件拒绝读入内存，防止大文件拖垮 WebSocket 响应。
 	if info.Size() > maxReadBytes {
 		return FileContent{}, fmt.Errorf("file too large to read through web workspace API: %d bytes", info.Size())
 	}
@@ -164,6 +170,7 @@ func Read(projectID, relPath string) (FileContent, error) {
 // Write 直接写入项目内文本文件。
 // 这是兼容路径；生产安全配置应优先走 PreviewWrite/ConfirmPendingWrite，确保用户确认 diff 后才落盘。
 func Write(projectID, relPath, content string) (FileContent, error) {
+	// 内容与路径先全部校验通过再碰磁盘，避免失败一半留下部分落盘结果。
 	if err := validateWritableContent(relPath, content); err != nil {
 		return FileContent{}, err
 	}
@@ -178,6 +185,7 @@ func Write(projectID, relPath, content string) (FileContent, error) {
 	if strings.TrimSpace(displayPath) == "" {
 		return FileContent{}, errors.New("path is required")
 	}
+	// 允许写入尚不存在的子目录：父目录由服务端按 0755 权限自动创建，前端无需逐级建目录。
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return FileContent{}, err
 	}
@@ -204,6 +212,7 @@ func projectRoot() (string, error) {
 // resolve 把项目内相对路径转换为绝对路径，并防止路径逃逸。
 // 返回的 displayPath 始终是 slash 风格相对路径，用于 JSON 响应、diff 和审计日志。
 func resolve(root, relPath string) (string, string, error) {
+	// 先规范化并拒绝绝对路径：filepath.Join 会把 ".." 收敛，但绝对路径会被当成新根，必须显式拦截。
 	cleanRel := filepath.Clean(strings.TrimSpace(relPath))
 	if cleanRel == "." {
 		cleanRel = ""
@@ -216,6 +225,7 @@ func resolve(root, relPath string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	// 用 Rel 反向核对最终绝对路径仍在项目根内，出现任一 ".." 前缀即判定逃逸并失败关闭。
 	rel, err := filepath.Rel(root, abs)
 	if err != nil {
 		return "", "", err
@@ -223,6 +233,7 @@ func resolve(root, relPath string) (string, string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", errors.New("path escapes project root")
 	}
+	// 根目录本身映射为空相对路径，保证所有下游 JSON 中的 path 都是项目内相对路径。
 	if rel == "." {
 		rel = ""
 	}

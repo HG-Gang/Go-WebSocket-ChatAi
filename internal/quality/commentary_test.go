@@ -1,3 +1,6 @@
+// internal/quality/commentary_test.go
+// 中文注释编码防回归测试：调用 scripts/check-commentary.ps1 扫描源码与 web 文件，
+// 确保新增中文注释不会引入乱码（mojibake）模式。
 package quality_test
 
 import (

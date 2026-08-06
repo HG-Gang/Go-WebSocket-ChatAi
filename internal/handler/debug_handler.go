@@ -1,3 +1,16 @@
+// internal/handler/debug_handler.go
+// 本地 Web 调试页的只读诊断快照接口。
+//
+// 文件功能：
+//   - DebugStatusHandler: 实时聚合 Go runtime、会话容量、Redis 连接池、网络代理、
+//     三个模型（openai/openairesponses/azureai）的配置快照与路由清单。
+//   - buildDebug* 系列: 分别组装 server/process/memory/capacity/features/redis/
+//     network/openai/responses/azure 各分片数据。
+//
+// 安全边界：
+//   - 接口只输出排障所需状态：API Key 一律经 maskAPIKey 脱敏（保留可识别前缀与末 4 位），
+//     Proxy URL 与 Endpoint 经 SafeURLForDisplay 隐藏凭据部分，任何路径都不输出密钥原文。
+//   - 接口可被调试页高频轮询，因此不执行 SCAN 等重操作；Redis key 明细由 redis_handler 单独负责。
 package handler
 
 import (
@@ -21,6 +34,7 @@ import (
 	"TozoAI-Chat-Api/internal/service/session"
 )
 
+// debugProcessStartedAt 进程启动时刻，作为 uptime 与内存快照的基准。
 var debugProcessStartedAt = time.Now()
 
 // DebugStatusHandler 为本地 Web 调试页面提供只读诊断快照。
@@ -70,6 +84,7 @@ func DebugStatusHandler(c *gin.Context) {
 	})
 }
 
+// buildDebugServerStatus 组装 server 分片：运行环境、监听地址、进程启动时长与 Go 运行时版本。
 func buildDebugServerStatus() gin.H {
 	now := time.Now()
 	env, mode, addr := "", "", ""
@@ -93,6 +108,8 @@ func buildDebugServerStatus() gin.H {
 	}
 }
 
+// buildDebugProcessStatus 组装 process 分片：PID、可执行文件路径、工作目录与进程启动时长。
+// 当前未被 DebugStatusHandler 引用，供测试与后续诊断场景复用。
 func buildDebugProcessStatus() gin.H {
 	executable, _ := os.Executable()
 	workingDir, _ := os.Getwd()
@@ -113,6 +130,8 @@ func buildDebugProcessStatus() gin.H {
 	}
 }
 
+// buildDebugMemoryStatus 读取 Go 运行时内存统计并组装 memory 分片，同时给出字节与 MB
+// 两种单位（含 GC 暂停总时长），便于直接判断内存水位与 GC 压力。
 func buildDebugMemoryStatus() gin.H {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
@@ -147,6 +166,8 @@ func buildDebugMemoryStatus() gin.H {
 	}
 }
 
+// buildDebugCapacityStatus 组装 capacity 分片：当前与最大活跃会话数、是否启用上限及占用百分比。
+// 未配置上限（maxActive 为 0）时按未启用处理，占用百分比为 0。
 func buildDebugCapacityStatus() gin.H {
 	active := session.ActiveCount()
 	maxActive := int64(0)
@@ -167,6 +188,8 @@ func buildDebugCapacityStatus() gin.H {
 	}
 }
 
+// buildDebugFeatureStatus 输出 jwt/rate_limit/billing/fallback/redis 各功能开关状态；
+// 全局配置缺失时返回空对象，避免调试页读取空指针。
 func buildDebugFeatureStatus() gin.H {
 	if conf.Global == nil {
 		return gin.H{}
@@ -180,6 +203,8 @@ func buildDebugFeatureStatus() gin.H {
 	}
 }
 
+// buildDebugRedisStatus 组装 redis 分片：配置地址/连接池参数、客户端可用性、
+// 800ms 超时的 Ping 结果（ping_ms 单位毫秒）与连接池统计。
 func buildDebugRedisStatus() gin.H {
 	status := gin.H{
 		"enabled":        false,
@@ -233,6 +258,8 @@ func buildDebugRedisStatus() gin.H {
 	return status
 }
 
+// buildDebugNetworkStatus 组装 network 分片：环境变量代理与 openai/azureai 两个模型
+// 实际生效的拨号代理（优先级 yaml proxy_url > 环境变量 > 直连）；代理地址输出前统一脱敏。
 func buildDebugNetworkStatus() gin.H {
 	httpProxy := strings.TrimSpace(os.Getenv("HTTP_PROXY"))
 	httpsProxy := strings.TrimSpace(os.Getenv("HTTPS_PROXY"))
@@ -283,6 +310,8 @@ func resolveProxy(cfg *conf.ModelConfig, envProxy string) (string, string) {
 	return "", "none"
 }
 
+// buildDebugOpenAIStatus 组装 openai 模型配置快照：功能开关、Realtime 参数、
+// instructions 摘要、API key 脱敏值与 WS 地址（隐藏凭据部分）。
 func buildDebugOpenAIStatus() gin.H {
 	cfg := conf.GetModel("openai")
 	if cfg == nil {
@@ -325,11 +354,15 @@ func buildDebugOpenAIStatus() gin.H {
 	}
 }
 
+// buildDebugResponsesStatus 组装 openairesponses 模型的安全配置快照，
+// 直接复用 provider 的 Status 输出，避免两处维护同一脱敏口径。
 func buildDebugResponsesStatus() gin.H {
 	cfg := conf.GetModel("openairesponses")
 	return openairesponses.Status(cfg)
 }
 
+// buildDebugAzureStatus 组装 azureai 模型配置快照：各 capability 的 deployment 清单、
+// API key 脱敏值、Realtime 参数与 planned_modules 展示。
 func buildDebugAzureStatus() gin.H {
 	cfg := conf.GetModel("azureai")
 	if cfg == nil {
@@ -399,10 +432,12 @@ func buildDebugAzureStatus() gin.H {
 	}
 }
 
+// bytesToMB 字节数转 MB，供调试页内存展示使用。
 func bytesToMB(v uint64) float64 {
 	return float64(v) / 1024 / 1024
 }
 
+// stringOrDefault 空串（去首尾空白后）时返回 fallback，否则原样返回。
 func stringOrDefault(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
@@ -410,6 +445,7 @@ func stringOrDefault(value, fallback string) string {
 	return value
 }
 
+// intOrDefault 非正值时返回 fallback，保证调试页展示的可读默认值。
 func intOrDefault(value, fallback int) int {
 	if value <= 0 {
 		return fallback
@@ -417,6 +453,8 @@ func intOrDefault(value, fallback int) int {
 	return value
 }
 
+// durationOrDefault 把配置的时间字符串解析为可读形式；解析失败时保留原文并
+// 标注实际生效的 fallback，让配置问题在调试页直接可见。
 func durationOrDefault(value string, fallback time.Duration) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback.String()
@@ -427,6 +465,8 @@ func durationOrDefault(value string, fallback time.Duration) string {
 	return value + " (invalid, fallback " + fallback.String() + ")"
 }
 
+// stringFromExtra 从模型配置的 Extra 表中读取字符串值；键缺失、值为 nil 或
+// 类型不是 string 时返回空串，避免类型断言 panic。
 func stringFromExtra(extra map[string]interface{}, key string) string {
 	if extra == nil {
 		return ""
@@ -441,6 +481,8 @@ func stringFromExtra(extra map[string]interface{}, key string) string {
 	return ""
 }
 
+// shortConfigHash 对配置文本取 sha256 前 6 字节摘要（空文本返回空串），
+// 用于在不泄露原文的前提下比对两端配置是否一致。
 func shortConfigHash(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -450,6 +492,7 @@ func shortConfigHash(value string) string {
 	return fmt.Sprintf("sha256:%x", sum[:6])
 }
 
+// maskProxyURL 代理 URL 展示前统一脱敏（隐藏用户名密码等凭据部分）。
 func maskProxyURL(raw string) string {
 	return logger.SafeURLForDisplay(raw)
 }

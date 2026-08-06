@@ -1,6 +1,10 @@
-// Package azureai 封装 Azure OpenAI 的 HTTP 能力代理。
-// 本包只处理普通 HTTP 接口：Chat Completions、Completions、图片、TTS、STT、TST。
-// Azure Realtime WebSocket 复用 internal/provider/openai 的四协程 Provider。
+// internal/provider/azureai/client.go
+// 文件功能：Azure OpenAI 普通 HTTP 接口（Chat Completions、Completions、图片、TTS、STT、
+// TST）的轻量代理客户端。输入为 capability 与请求体，输出为上游 *http.Response（调用方
+// 负责关闭 resp.Body）；不负责 Realtime WebSocket（复用 internal/provider/openai 的四协程实现）。
+//
+// 安全边界：API key 仅作为 api-key 请求头发送给上游，不写入日志；调试快照只暴露
+// api_key_configured 布尔值，不返回密钥原文；配置缺失、未启用或缺少 key 时返回错误失败关闭。
 package azureai
 
 import (
@@ -17,6 +21,8 @@ import (
 )
 
 const (
+	// 能力标识：每个值决定上游路径后缀与 deployment 分组（见 pathSuffixFor、capabilityGroup），
+	// 调用方需保证 capability 与配置中 models.azureai 的分组配置匹配。
 	CapabilityChatCompletions     = "chat_completions"
 	CapabilityCompletions         = "completions"
 	CapabilityImageGenerations    = "image_generations"
@@ -26,6 +32,7 @@ const (
 	CapabilityAudioTranslations   = "audio_translations"
 	CapabilityTST                 = "tst"
 
+	// 默认请求超时（毫秒），仅在配置未提供 timeout_ms/timeout 时使用。
 	defaultHTTPTimeoutMs = 60000
 )
 
@@ -37,6 +44,8 @@ type Client struct {
 }
 
 // New 创建 Azure HTTP 客户端。
+// cfg 为空时按空配置创建；Timeout 取配置中的 timeout_ms（毫秒）或 timeout（秒），
+// 均未配置时回落到默认 60 秒。
 func New(cfg *conf.ModelConfig) *Client {
 	if cfg == nil {
 		cfg = &conf.ModelConfig{}
@@ -49,9 +58,13 @@ func New(cfg *conf.ModelConfig) *Client {
 	}
 }
 
-// Do 将请求体按 capability 代理到 Azure OpenAI 上游。
-// 调用方负责关闭返回的 resp.Body，这样 handler 可以直接流式复制二进制音频/图片响应。
+// Do 按 capability 将请求体代理到 Azure OpenAI 上游。
+// 参数：capability 接口能力标识；contentType/accept 为透传的请求头值；body 为请求体读取器。
+// 成功返回上游 *http.Response，调用方负责关闭 resp.Body，handler 可直接流式复制二进制
+// 音频/图片响应；任何配置或上游错误都返回 error 失败关闭，不会带缺 key 或未启用状态发起请求。
 func (c *Client) Do(ctx context.Context, capability string, contentType string, accept string, body io.Reader) (*http.Response, error) {
+	// 前置校验失败关闭：客户端未初始化、模型未启用或缺少 API key 时直接返回错误，
+	// 避免以空 key 或未启用状态打到上游，也避免产生无意义的噪音请求。
 	if c == nil || c.cfg == nil {
 		return nil, fmt.Errorf("Azure OpenAI 配置未初始化")
 	}
@@ -62,6 +75,7 @@ func (c *Client) Do(ctx context.Context, capability string, contentType string, 
 		return nil, fmt.Errorf("Azure OpenAI 缺少 AZURE_OPENAI_API_KEY")
 	}
 
+	// 上游 URL 任一部分（endpoint、api-version、deployment、路径）缺失都会在这里失败关闭。
 	upstreamURL, err := c.urlFor(capability)
 	if err != nil {
 		return nil, err
@@ -71,6 +85,8 @@ func (c *Client) Do(ctx context.Context, capability string, contentType string, 
 	if err != nil {
 		return nil, fmt.Errorf("创建 Azure OpenAI 请求失败: %w", err)
 	}
+	// 鉴权头组装：api-key 只在此处设置；Content-Type/Accept 仅在调用方显式给出时透传，
+	// 未给出时由上游按请求体内容自行识别。
 	req.Header.Set("api-key", c.cfg.APIKey)
 	if strings.TrimSpace(contentType) != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -79,6 +95,8 @@ func (c *Client) Do(ctx context.Context, capability string, contentType string, 
 		req.Header.Set("Accept", accept)
 	}
 
+	// 上游网络错误时回传脱敏信息：endpoint 只保留 scheme/host，error 内容被脱敏，
+	// 避免 API key 或完整 URL 出现在错误链与日志中。
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("请求 Azure OpenAI 失败: endpoint=%s error=%s", logger.SafeURLForDisplay(upstreamURL), logger.RedactField("content", err.Error()))
@@ -114,7 +132,11 @@ func Status(cfg *conf.ModelConfig) map[string]any {
 	}
 }
 
+// urlFor 组装上游完整 URL：base + /openai/deployments/{deployment} + 能力路径后缀 + api-version；
+// 任一必需配置缺失时返回错误失败关闭。
 func (c *Client) urlFor(capability string) (string, error) {
+	// endpoint、api-version、deployment 任一为空都失败关闭：缺 api-version 的请求必然被
+	// Azure 拒绝，缺 deployment 则 URL 不指向任何真实模型。
 	base := normalizeEndpoint(c.cfg.Endpoint)
 	if base == "" {
 		return "", fmt.Errorf("Azure OpenAI endpoint 为空")
@@ -132,6 +154,7 @@ func (c *Client) urlFor(capability string) (string, error) {
 		return "", err
 	}
 
+	// PathEscape 防止 deployment 中的特殊字符破坏 URL 结构；api-version 走 Query 编码追加。
 	escapedDeployment := url.PathEscape(deployment)
 	rawURL := fmt.Sprintf("%s/openai/deployments/%s%s", base, escapedDeployment, pathSuffix)
 	parsed, err := url.Parse(rawURL)
@@ -144,6 +167,8 @@ func (c *Client) urlFor(capability string) (string, error) {
 	return parsed.String(), nil
 }
 
+// pathSuffixFor 返回 capability 对应的上游路径后缀；未知 capability 返回错误失败关闭，
+// 防止拼出无意义的 URL 后把请求发到错误地址。
 func pathSuffixFor(capability string) (string, error) {
 	switch capability {
 	case CapabilityChatCompletions:
@@ -165,6 +190,8 @@ func pathSuffixFor(capability string) (string, error) {
 	}
 }
 
+// capabilityGroup 把 capability 映射为配置中的 deployment 分组名（chat/image/tts/stt/tst），
+// 用于 deploymentFor 按分组查配置；未知 capability 返回空串，最终由 urlFor 失败关闭。
 func capabilityGroup(capability string) string {
 	switch capability {
 	case CapabilityChatCompletions:
@@ -184,6 +211,8 @@ func capabilityGroup(capability string) string {
 	}
 }
 
+// deploymentFor 按分组顺序查找 Extra 中的 deployment 配置，全组缺失时回落到 DefaultModel。
+// 例如 completions 组优先 completions_deployment、其次 chat_deployment，允许多能力复用同一部署。
 func deploymentFor(cfg *conf.ModelConfig, group string) string {
 	if cfg == nil {
 		return ""
@@ -216,6 +245,8 @@ func deploymentFor(cfg *conf.ModelConfig, group string) string {
 	return strings.TrimSpace(cfg.DefaultModel)
 }
 
+// normalizeEndpoint 统一上游 base URL：补 https:// 前缀、去尾部斜杠，
+// 并剥离 /openai/v1、/openai 后缀——新版 Azure 路径从根开始拼 /openai/deployments/...。
 func normalizeEndpoint(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
@@ -234,6 +265,8 @@ func normalizeEndpoint(endpoint string) string {
 	return strings.TrimRight(endpoint, "/")
 }
 
+// timeoutMs 读取超时配置：timeout_ms 直接按毫秒使用，timeout 按秒换算（×1000）；
+// 非法值或未配置时回落到默认超时。
 func timeoutMs(cfg *conf.ModelConfig) int {
 	if cfg == nil {
 		return defaultHTTPTimeoutMs
@@ -247,6 +280,7 @@ func timeoutMs(cfg *conf.ModelConfig) int {
 	return defaultHTTPTimeoutMs
 }
 
+// intFromExtra 从 Extra 读取整数值；缺失或解析失败返回 0，由调用方视为未配置。
 func intFromExtra(cfg *conf.ModelConfig, key string) int {
 	value := extraString(cfg, key)
 	if value == "" {
@@ -259,6 +293,8 @@ func intFromExtra(cfg *conf.ModelConfig, key string) int {
 	return 0
 }
 
+// extraString 从 Extra 读取配置值并转为去除首尾空白的字符串；缺失或 nil 时返回空串，
+// 非字符串类型（int/float/bool 等）也统一转字符串，兼容配置来源差异。
 func extraString(cfg *conf.ModelConfig, key string) string {
 	if cfg == nil || cfg.Extra == nil {
 		return ""
@@ -277,6 +313,7 @@ func extraString(cfg *conf.ModelConfig, key string) string {
 	}
 }
 
+// moduleStatus 组装调试页面所需的单模块状态条目；configured 表示该分组已配置 deployment。
 func moduleStatus(name, route, method, deployment, upstream string, implemented bool) map[string]any {
 	return map[string]any{
 		"name":        name,

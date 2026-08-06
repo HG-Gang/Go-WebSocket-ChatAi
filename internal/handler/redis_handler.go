@@ -1,3 +1,16 @@
+// internal/handler/redis_handler.go
+// Redis 调试接口：为 Web 调试页提供 Redis key 列表、类型、TTL 与脱敏后的值。
+//
+// 文件功能：
+//   - RedisKeysHandler: 按 pattern/cursor/count 执行 SCAN，逐 key 读取类型、TTL 与值，
+//     并附加业务分类与说明，供调试页展示。
+//   - sanitize* 系列: 对输出值做脱敏，判定敏感后仅返回长度与 sha256 前缀摘要。
+//   - explainRedisKey: 把 key 归类到 billing/session/rate_limit/openai/auth/other 分类。
+//
+// 安全边界：
+//   - 调试页输出不返回 API key、token、body 等敏感内容：key 名/字段名命中敏感标记
+//     或值形似密钥时，一律替换为长度 + sha256 摘要（失败关闭，未被证明安全的值不原样输出）。
+//   - 整体读取受 8 秒超时约束，SCAN 单批数量钳制在 200~1000，防止调试操作拖垮 Redis。
 package handler
 
 import (
@@ -27,7 +40,12 @@ type RedisKeyInfo struct {
 	ValueSafe   bool        `json:"value_safe"`
 }
 
+// RedisKeysHandler Redis 调试页数据接口。
+// 参数：pattern（SCAN 匹配模式）、cursor（SCAN 游标）、count（单批数量，钳制到
+// 200~1000）、full=1（list/zset 读取全部元素而非前 100 个）。成功返回各 key 的
+// 类型/TTL/分类/脱敏值；Redis 客户端不可用返回 503，SCAN 失败返回 500。
 func RedisKeysHandler(c *gin.Context) {
+	// 整个读取链路共用 8 秒超时：key 多或单 key 数据量大时宁可失败，也不长时间占用 Redis。
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
@@ -36,6 +54,7 @@ func RedisKeysHandler(c *gin.Context) {
 	countStr := c.DefaultQuery("count", "200")
 	fullValue := c.DefaultQuery("full", "0") == "1"
 
+	// 解析失败按默认值处理；count 超出上限时钳制到 200，防止单次 SCAN 拉取过多 key。
 	cursor, _ := strconv.ParseUint(cursorStr, 10, 64)
 	count, _ := strconv.ParseInt(countStr, 10, 64)
 	if count <= 0 || count > 1000 {
@@ -60,6 +79,8 @@ func RedisKeysHandler(c *gin.Context) {
 		return
 	}
 
+	// 逐 key 收集元数据；单个 key 读取失败时保留错误信息继续处理其余 key，
+	// 避免调试页因个别 key 异常而整体不可用。
 	result := make([]RedisKeyInfo, 0, len(keys))
 	for _, key := range keys {
 		category, description := explainRedisKey(key)
@@ -78,6 +99,7 @@ func RedisKeysHandler(c *gin.Context) {
 		}
 		info.Type = keyType
 
+		// TTL 读取失败时按 -1 展示，表示无法确认过期时间。
 		ttl, err := client.TTL(ctx, key).Result()
 		if err != nil {
 			info.TTL = -1
@@ -85,6 +107,7 @@ func RedisKeysHandler(c *gin.Context) {
 			info.TTL = int64(ttl.Seconds())
 		}
 
+		// 按实际类型读取值；list/zset 默认只取前 100 个元素，full=1 时才读取全部。
 		switch keyType {
 		case "string":
 			val, err := client.Get(ctx, key).Result()
@@ -158,6 +181,7 @@ func RedisKeysHandler(c *gin.Context) {
 	})
 }
 
+// sanitizeRedisHash 对 hash 的每个字段值逐个脱敏，字段名本身不变，便于调试页定位。
 func sanitizeRedisHash(key string, values map[string]string) map[string]interface{} {
 	out := make(map[string]interface{}, len(values))
 	for field, value := range values {
@@ -166,6 +190,7 @@ func sanitizeRedisHash(key string, values map[string]string) map[string]interfac
 	return out
 }
 
+// sanitizeRedisStrings 对 list/set 的每个元素逐个脱敏。
 func sanitizeRedisStrings(key, field string, values []string) []interface{} {
 	out := make([]interface{}, 0, len(values))
 	for _, value := range values {
@@ -174,6 +199,7 @@ func sanitizeRedisStrings(key, field string, values []string) []interface{} {
 	return out
 }
 
+// sanitizeRedisValue 返回可安全展示的值：命中敏感规则时返回脱敏摘要，否则原样返回。
 func sanitizeRedisValue(key, field string, value interface{}) interface{} {
 	text := strings.TrimSpace(fmt.Sprint(value))
 	if text == "" {
@@ -185,6 +211,9 @@ func sanitizeRedisValue(key, field string, value interface{}) interface{} {
 	return redactedRedisValue(text)
 }
 
+// isSafeRedisValue 判定值是否可原样展示。
+// key/field 命中敏感标记、值形似密钥（sk- 前缀、JWT、Bearer 等）时一律不展示；
+// 数值与白名单字段名直接放行，其余值要求单行且不超过 80 字符。
 func isSafeRedisValue(key, field, value string) bool {
 	if isSensitiveRedisKey(key) || isSensitiveRedisField(field) {
 		return false
@@ -224,6 +253,9 @@ func isSafeRedisValue(key, field, value string) bool {
 	return len(value) <= 80 && !strings.Contains(value, "\n")
 }
 
+// isSensitiveRedisKey 按 key 名是否含敏感标记判断。
+// billing:/session:/rate_limit 前缀的 key 视为业务 key 不整名屏蔽（其值仍会逐字段脱敏），
+// 其余 key 命中敏感标记即视为敏感。
 func isSensitiveRedisKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	if key == "" {
@@ -240,6 +272,8 @@ func isSensitiveRedisKey(key string) bool {
 	return false
 }
 
+// isSensitiveRedisField 按字段名判断：命中密钥类标记，或可能携带内容类数据
+// （content/diff/payload/raw/body/arguments/history）的字段都视为敏感。
 func isSensitiveRedisField(field string) bool {
 	field = strings.ToLower(strings.TrimSpace(field))
 	if field == "" {
@@ -258,6 +292,8 @@ func isSensitiveRedisField(field string) bool {
 	return false
 }
 
+// redisSensitiveMarkers 密钥类敏感标记子串，命中即不得原样输出。
+// 注意：只做子串匹配，保持全小写，覆盖常见英文写法即可。
 func redisSensitiveMarkers() []string {
 	return []string{
 		"api_key",
@@ -274,6 +310,8 @@ func redisSensitiveMarkers() []string {
 	}
 }
 
+// looksLikeSecret 通过常见密钥形态判断值是否形似密钥：
+// sk- 前缀、JWT 风格 base64（eyJ 开头）、Bearer 前缀或 access_token= 参数。
 func looksLikeSecret(value string) bool {
 	lower := strings.ToLower(value)
 	for _, marker := range redisSensitiveMarkers() {
@@ -287,6 +325,7 @@ func looksLikeSecret(value string) bool {
 		strings.Contains(value, "access_token=")
 }
 
+// isNumericString 判断值是否可解析为数值，用于放行计费/限流等纯数字统计值。
 func isNumericString(value string) bool {
 	if value == "" {
 		return false
@@ -297,11 +336,15 @@ func isNumericString(value string) bool {
 	return false
 }
 
+// redactedRedisValue 生成脱敏摘要：返回值的字节长度与 sha256 前 6 字节，
+// 不泄露原文任何信息，同时保留长度便于判断原始数据规模。
 func redactedRedisValue(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("[REDACTED redis_value len=%d sha256:%x]", len(value), sum[:6])
 }
 
+// explainRedisKey 按 key 名匹配规则返回业务分类与说明文案，供调试页展示。
+// 匹配顺序自上而下，未命中任何规则时归入 other 并提示需关注 TTL 与清理策略。
 func explainRedisKey(key string) (category, description string) {
 	k := strings.ToLower(key)
 	switch {

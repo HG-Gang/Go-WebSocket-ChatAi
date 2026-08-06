@@ -1,3 +1,5 @@
+// internal/service/alert/dingtalk_test.go
+// 钉钉告警单元测试：覆盖发送内容、恢复事件、冷却抑制、审计日志与 webhook 脱敏。
 package alert
 
 import (

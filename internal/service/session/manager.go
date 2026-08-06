@@ -14,6 +14,9 @@
 //
 // 心跳检测完全由 Provider 层（client_ws.go 的 writePump/readPump）负责。
 // Session 层不参与心跳，只负责生命周期管理、Redis 元数据和计费。
+//
+// 安全边界：UserID/UserName 来自 handler 层 JWT 解析结果，本包不执行鉴权，
+// 也不校验来源可信性，仅将其透传给日志、Redis 元数据与计费。
 package session
 
 import (
@@ -104,6 +107,7 @@ func (s *Session) SetClientLocation(location map[string]string) {
 	if s == nil || len(location) == 0 {
 		return
 	}
+	// 只保留 trim 后非空的键值对，防止空白字段污染监控展示与日志。
 	s.IPLocation = make(map[string]string, len(location))
 	for key, value := range location {
 		key = strings.TrimSpace(key)
@@ -128,7 +132,8 @@ func (s *Session) Start(ctx context.Context) {
 	}
 	metrics.SessionStartedWithLocation(s.ID, s.RequestID, s.UserID, s.UserName, s.DeviceID, s.Model, remoteAddr, s.UserAgent, s.IPLocation)
 
-	// 1. 记录会话元数据到Redis（使用 HSetMap 支持 map 批量写入）
+	// 先持久化会话元数据到 Redis（TTL 取模型配置的 MaxSessionTTL），
+	// 使会话列表/看板在进程重启后仍可查询；写入失败不阻断启动，会话状态以内存为准。
 	redisKey := fmt.Sprintf("session:%s", s.ID)
 	modelCfg := conf.GetModel(s.Model)
 	ttl := time.Duration(modelCfg.MaxSessionTTL) * time.Second
@@ -146,8 +151,8 @@ func (s *Session) Start(ctx context.Context) {
 		"max_ttl":     modelCfg.MaxSessionTTL,
 	}, ttl)
 
-	// 2. 将带 request_id 的 logger 传递给 Provider（贯穿四协程日志）
-	//    Provider.SetLogger 是可选方法，通过接口断言调用
+	// 通过接口断言把带 request_id 的 logger 注入 Provider，使四协程日志携带同一链路标识；
+	// Provider 未实现相应接口时跳过，不改变其默认行为。
 	if lp, ok := s.Provider.(provider.LoggerProvider); ok {
 		lp.SetLogger(s.log)
 	}
@@ -155,12 +160,12 @@ func (s *Session) Start(ctx context.Context) {
 		cp.SetSessionContext(s.UserID, s.ID)
 	}
 
-	// 3. 启动Provider的WS处理逻辑（阻塞直到会话结束）
+	// HandleWS 阻塞直到会话结束；内部错误只记日志，连接状态与恢复由 Provider 层管理。
 	if err := s.Provider.HandleWS(ctx, s.AppConn); err != nil {
 		s.log.Error("Provider WS 处理异常退出", zap.Error(err))
 	}
 
-	// 4. HandleWS 返回 = 会话结束
+	// HandleWS 返回即会话生命周期结束，上报时长指标并记结束日志。
 	metrics.SessionEnded(s.ID, "provider_return", time.Since(s.StartTime))
 	s.log.Info("会话正常结束",
 		zap.Float64("duration_seconds", time.Since(s.StartTime).Seconds()))
@@ -187,7 +192,7 @@ func (s *Session) Close() {
 	}
 	s.closed = true
 
-	// 1. 关闭与App的WS连接
+	// 通知 App 并关闭 WS 连接；写错误忽略，连接可能已被对端先行关闭。
 	if s.AppConn != nil {
 		_ = s.AppConn.WriteMessage(
 			websocket.CloseMessage,
@@ -196,22 +201,22 @@ func (s *Session) Close() {
 		_ = s.AppConn.Close()
 	}
 
-	// 2. 关闭Provider连接
+	// 关闭 Provider 上游连接，触发其内部资源清理。
 	if s.Provider != nil {
 		_ = s.Provider.Close()
 	}
 
-	// 3. 更新Redis会话状态
+	// 尽力把 Redis 中的会话状态标记为 closed；失败仅记日志，不阻塞关闭流程。
 	redisKey := fmt.Sprintf("session:%s", s.ID)
 	_ = redis.HSet(s.Model, redisKey, "status", "closed")
 	_ = redis.HSet(s.Model, redisKey, "end_time", time.Now().Unix())
 
-	// 4. 统计会话耗时
+	// 上报会话时长指标，供容量与稳定性监控使用。
 	duration := time.Since(s.StartTime).Seconds()
 	metrics.SessionEnded(s.ID, "session_close", time.Since(s.StartTime))
 	s.log.Info("会话已关闭", zap.Float64("duration_seconds", duration))
 
-	// 5. Token消耗统计
+	// 关闭前拉取 Token 消耗用于日志展示；查询失败或消耗为零时跳过，不影响关闭。
 	input, output, total, err := billing.GetSessionUsage(s.Model, s.ID)
 	if err != nil {
 		s.log.Warn("获取会话 Token 消耗失败", zap.Error(err))

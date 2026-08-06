@@ -1,7 +1,12 @@
-// Package stats 提供统一资源统计入口。
-// 这个包先实现进程内聚合，用来把 Realtime WebSocket 和 HTTP Responses 的 token、费用、
-// 延迟、错误等字段收敛到同一套 day/week/month 口径；后续可以把 collector 的存储层替换为
-// Redis、数据库或日志聚合系统，而不需要让各个 handler/provider 继续维护多套统计结构。
+// internal/service/stats/stats.go
+// 统一资源统计入口（进程内聚合）：
+// - 输入：Realtime/Responses/System/Workspace 各链路上报的 UsageRecord 与 ResourceEvent
+// - 输出：day/week/month 三套口径的 ResourcePeriodStats（汇总 + 时间线）
+// - 内存上限 usage 与 resource event 各 10000 条，超出后丢弃最旧记录
+//
+// 明确不负责：
+// - 持久化与跨实例聚合（存储层未来可替换为 Redis/DB/日志聚合，不影响调用方）
+// - 来源可信性校验：Source 由调用方标注，本包不鉴权、不验证
 package stats
 
 import (
@@ -260,6 +265,7 @@ func buildPeriod(records []UsageRecord, events []ResourceEvent, now, start time.
 	summaryAcc := newAccumulator()
 	buckets := make(map[string]*accumulator)
 
+	// 只统计落在 [start, now] 窗口内且满足过滤条件的记录；时间戳缺失或越界的记录直接跳过。
 	for _, record := range records {
 		if !resourceFilterMatchesUsage(filter, record) {
 			continue
@@ -271,6 +277,7 @@ func buildPeriod(records []UsageRecord, events []ResourceEvent, now, start time.
 		if at.Before(start) || at.After(now) {
 			continue
 		}
+		// 同一记录同时进窗口汇总与对应时间桶，桶 key 为固定格式的日期/小时字符串。
 		summaryAcc.addUsage(record)
 		label := at.Format(bucketLayout)
 		if buckets[label] == nil {
@@ -279,6 +286,7 @@ func buildPeriod(records []UsageRecord, events []ResourceEvent, now, start time.
 		buckets[label].addUsage(record)
 	}
 
+	// 资源事件与用量记录走同一窗口与桶逻辑，只影响独立 kind 计数器，不增加 Requests。
 	for _, event := range events {
 		if !resourceFilterMatchesEvent(filter, event) {
 			continue
@@ -298,6 +306,7 @@ func buildPeriod(records []UsageRecord, events []ResourceEvent, now, start time.
 		buckets[label].addEvent(event)
 	}
 
+	// 时间线按桶 key 字典序输出（固定格式的日期/小时字符串），保证从旧到新。
 	labels := make([]string, 0, len(buckets))
 	for label := range buckets {
 		labels = append(labels, label)
@@ -380,6 +389,7 @@ func (a *accumulator) addEvent(event ResourceEvent) {
 		a.totals.ByModel[model] += count
 	}
 
+	// 按 kind 归入独立计数器；workspace_write_failed 同时计入 Errors 总数。
 	switch kind {
 	case ResourceKindCapacityRejected:
 		a.totals.CapacityRejected += count
@@ -406,6 +416,7 @@ func (a *accumulator) addEvent(event ResourceEvent) {
 		a.totals.Errors += count
 	}
 
+	// 已按 kind 计入 Errors 的事件不重复计数；其余 kind 携带失败状态时也计入 Errors。
 	if kind != ResourceKindError && kind != ResourceKindWorkspaceWriteFailed && resourceEventFailed(event) {
 		a.totals.Errors += count
 	}
@@ -422,12 +433,14 @@ func (a *accumulator) summary() ResourceSummary {
 	if out.ByKind == nil {
 		out.ByKind = make(map[string]int)
 	}
+	// 平均延迟只在存在请求数时计算，避免除零。
 	if out.Requests > 0 {
 		out.AvgLatencyMs = a.latencySum / int64(out.Requests)
 	}
 	return out
 }
 
+// isFailed 判断用量记录是否算失败：有 Error 文本或状态为 failed/error/incomplete。
 func isFailed(record UsageRecord) bool {
 	if strings.TrimSpace(record.Error) != "" {
 		return true

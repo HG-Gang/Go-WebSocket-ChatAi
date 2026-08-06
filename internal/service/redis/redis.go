@@ -1,11 +1,15 @@
 // internal/service/redis/redis.go
-// 作用：Redis 客户端的统一封装层
-// 功能：
+// Redis 客户端的统一封装层
+//
+// 文件功能：
 // - 初始化 Redis 连接（使用 conf.Global.Redis 配置）
 // - 提供常用操作封装（Get/Set/Expire/HGet/HSet 等）
 // - 支持按模型隔离 key 前缀（避免不同模型数据冲突）
-// - 自动处理连接池、超时、重连
-
+// - 连接池、超时、重连由 go-redis 自动管理
+//
+// 安全边界：
+// - 密码只来自 conf.Global.Redis.Password（生产环境从环境变量注入），本文件不落盘密钥
+// - Redis 未启用时 GetClient 返回 nil，调用方需自行判断，本包不做失败关闭
 package redis
 
 import (
@@ -27,6 +31,7 @@ var (
 )
 
 // Init 初始化 Redis 客户端（单例模式）
+// 使用 sync.Once 保证并发调用只初始化一次；Redis 未启用时静默跳过。
 func Init() {
 	once.Do(func() {
 		if !conf.Global.Redis.Enabled {
@@ -34,6 +39,7 @@ func Init() {
 			return
 		}
 
+		// 连接池配置缺失或非法时回退到保守默认值，避免连接池过小导致请求排队。
 		poolSize := conf.Global.Redis.PoolSize
 		if poolSize <= 0 {
 			poolSize = 128
@@ -54,7 +60,7 @@ func Init() {
 			WriteTimeout: 3 * time.Second,            // 写入超时
 		})
 
-		// 测试连接
+		// 启动即 Ping 验证连通性，失败直接 Fatal 失败关闭，避免应用带病启动。
 		ctx := context.Background()
 		if _, err := client.Ping(ctx).Result(); err != nil {
 			logger.GetModelLogger("global").Fatal("Redis 连接失败", zap.Error(err))
@@ -84,6 +90,7 @@ func MustGetClient() *redis.Client {
 
 // GetWithPrefix 按模型添加 key 前缀（避免冲突）
 func GetWithPrefix(model, key string) string {
+	// 空模型名回退到 global 前缀，保证所有调用方都有隔离的 Key 空间。
 	if model == "" {
 		model = "global"
 	}
@@ -110,7 +117,7 @@ func HSetMap(model, key string, fields map[string]interface{}, expiration time.D
 	ctx := context.Background()
 	prefixedKey := GetWithPrefix(model, key)
 
-	// 将 map 展开为 HSet 参数列表
+	// map 展开为 HSet 参数列表；用 Pipeline 把写入与过期合并为一次网络往返，TTL 非正数时不设置过期。
 	args := make([]interface{}, 0, len(fields)*2)
 	for k, v := range fields {
 		args = append(args, k, v)

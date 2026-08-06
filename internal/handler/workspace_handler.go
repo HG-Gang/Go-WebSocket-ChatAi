@@ -1,3 +1,14 @@
+// internal/handler/workspace_handler.go
+// Workspace HTTP 处理器：暴露当前项目的受控文件浏览与写入视图。
+//
+// 文件功能：
+//   - 项目浏览：WorkspaceProjectsHandler/WorkspaceListHandler/WorkspaceReadHandler。
+//   - 文件写入：WorkspaceWriteHandler 在安全配置开启时只创建 pending diff，必须再走确认接口才真正落盘；
+//     关闭确认的直写路径仅用于兼容旧配置，生产环境不应关闭 WorkspaceWriteConfirm。
+//
+// 安全边界：
+//   - project_id 目前只接受 current，所有 path 都在 service 层解析为项目内相对路径。
+//   - 确认/拒绝接口都会写入审计 actor（user_id/user_name/request_id），便于追溯每次落盘来源。
 package handler
 
 import (
@@ -9,10 +20,6 @@ import (
 	"TozoAI-Chat-Api/conf"
 	"TozoAI-Chat-Api/internal/service/workspace"
 )
-
-// Workspace handler 只暴露当前项目的受控文件视图。
-// project_id 目前只接受 current，所有 path 都会在 service 层解析为项目内相对路径；
-// 写入入口在生产安全配置开启时只创建 pending diff，必须再走确认接口才会真正落盘。
 
 // workspaceFileRequest 是前端或模型工具 HTTP 代理提交的文件写入请求。
 // ProjectID 当前只允许 current，Path 是项目内相对路径，Content 是 UTF-8 文本内容。
@@ -72,6 +79,7 @@ func WorkspaceWriteHandler(c *gin.Context) {
 		return
 	}
 	projectID := defaultProjectID(req.ProjectID)
+	// 安全开关开启时只生成 pending diff，落盘必须等待用户确认，防止模型工具绕过确认直接修改项目文件。
 	if workspaceWriteConfirmEnabled() {
 		pending, err := workspace.PreviewWrite(projectID, req.Path, req.Content, workspaceActor(c, "http"))
 		if err != nil {

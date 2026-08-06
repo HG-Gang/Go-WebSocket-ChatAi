@@ -1,3 +1,12 @@
+// internal/handler/web_static_handler.go
+// /web 静态页面处理器：提供静态文件并为 HTML 自动注入共享主题脚本。
+//
+// 文件功能：
+//   - WebStaticHandler：把 Gin 路由参数解析为 web 根目录内的静态资源并返回；HTML 文件额外注入 theme.js。
+//   - injectSharedThemeScript：统一旧页面的相对路径/缓存版本主题脚本，防止新增页面漏接颜色模式同步。
+//
+// 安全边界：
+//   - resolveWebStaticPath 阻断路径穿越，非法路径返回 403，绝不继续尝试 ServeFile。
 package handler
 
 import (

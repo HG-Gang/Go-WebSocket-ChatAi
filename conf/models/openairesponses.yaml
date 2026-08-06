@@ -16,6 +16,13 @@ extra:
   timeout_ms: 60000
   # store=false 表示默认不让 OpenAI 保存本次响应，调用方显式传 store 时以调用方为准。
   store: false
+  type: "openai"
+  billing_mode: "token"
+  # 看板费用估算（每百万 token 美元，可按实际账单调整）
+  input_price_per_1m: 2.0
+  output_price_per_1m: 8.0
+  cached_input_price_per_1m: 0.5
+  reasoning_price_per_1m: 0
 
 realtime:
   name: ""

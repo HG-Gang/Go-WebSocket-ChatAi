@@ -1,7 +1,11 @@
 // pkg/protocol/openai/server_events.go
-// 服务端事件定义（OpenAI Realtime API → App）
-// 参考 go-xiaozhi 的完整实现，覆盖所有 OpenAI Realtime 服务端事件类型
-// 职责：仅定义结构体和序列化/反序列化逻辑，不包含业务处理
+// 文件功能：定义 OpenAI Realtime API 的服务端事件结构体及其 JSON 序列化/反序列化，
+// 覆盖 OpenAI 官方文档列出的全部服务端事件类型（参考 go-xiaozhi 的完整实现）。
+// 输入：OpenAI 侧下发的单条事件 JSON 字节；输出：按 type 字段分发后的具体事件
+// 结构体，或序列化后的 JSON 字节。
+// 不负责：事件的业务处理、透传与缓存（见 internal/provider/openai/events_server.go）。
+// 兼容说明：旧版预览事件名（response.text.delta 等）与新版事件名解析到同一结构体，
+// 保证升级过渡期两端事件语义一致，见下方常量与 UnmarshalServerEvent。
 package openai
 
 import (
@@ -340,7 +344,7 @@ type ServerEventInterface interface {
 
 // ======================== 序列化/反序列化 ========================
 
-// unmarshalServerEvent 泛型反序列化服务端事件
+// unmarshalServerEvent 泛型反序列化服务端事件；JSON 不合法时返回错误，不返回部分解析结果。
 func unmarshalServerEvent[T ServerEventInterface](data []byte) (*T, error) {
 	var t T
 	err := json.Unmarshal(data, &t)
@@ -350,15 +354,15 @@ func unmarshalServerEvent[T ServerEventInterface](data []byte) (*T, error) {
 	return &t, nil
 }
 
-// MarshalServerEvent 序列化服务端事件为 JSON
+// MarshalServerEvent 将服务端事件序列化为 JSON 字节；失败仅发生在结构体本身不可序列化时。
 func MarshalServerEvent(event ServerEvent) ([]byte, error) {
 	return json.Marshal(event)
 }
 
 // UnmarshalServerEvent 反序列化 JSON 为服务端事件
-// 核心逻辑：先提取 type 字段，再根据类型分发到具体结构体
+// 核心逻辑：先提取 type 字段，再根据类型分发到具体结构体；旧版预览事件名映射到新版结构体
 func UnmarshalServerEvent(data []byte) (ServerEvent, error) {
-	// 1. 提取事件类型
+	// 先只解析 type 字段：类型未知时不再解析整个 payload，避免把未识别数据误当作已知事件。
 	var eventType struct {
 		Type ServerEventType `json:"type"`
 	}
@@ -366,7 +370,7 @@ func UnmarshalServerEvent(data []byte) (ServerEvent, error) {
 		return nil, fmt.Errorf("解析服务端事件类型失败: %w", err)
 	}
 
-	// 2. 按类型分发反序列化
+	// 旧版预览事件名与新版事件共用同一结构体解析，保证升级过渡期客户端事件透传不受影响。
 	switch eventType.Type {
 	case ServerEventTypeError:
 		return unmarshalServerEvent[ErrorEvent](data)
@@ -427,6 +431,7 @@ func UnmarshalServerEvent(data []byte) (ServerEvent, error) {
 	case ServerEventTypeRateLimitsUpdated:
 		return unmarshalServerEvent[RateLimitsUpdatedEvent](data)
 	default:
+		// 未识别的事件类型返回错误而非静默忽略，便于上游新增事件时及时适配。
 		return nil, fmt.Errorf("未知的服务端事件类型: %s", eventType.Type)
 	}
 }

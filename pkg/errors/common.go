@@ -1,8 +1,8 @@
 // pkg/errors/common.go
-// 通用错误处理：
-// 1. 定义业务错误码
-// 2. 业务错误结构体（包含错误码、消息、原始错误）
-// 3. 错误包装/解包工具方法
+// 文件功能：定义全局唯一业务错误码常量与统一业务错误结构体 BusinessError。
+// 输入：业务侧的错误码与用户可见消息；输出：可被上层直接序列化为 JSON 的错误结构。
+// 不负责：各上游（OpenAI/Azure AI）的特有错误类型，其扩展文件见同包
+// openai_errors.go、azureai_error.go；也不负责错误日志的记录与上报。
 package errors
 
 // 通用业务错误码（全局唯一）
@@ -36,8 +36,9 @@ const (
 )
 
 // BusinessError 业务错误结构体
-// 包含错误码、用户可见消息、原始错误、调用栈（便于排查）
+// 只承载业务错误码与用户可见消息，不包含原始错误和调用栈；
+// 排查所需的原始错误链由调用方在日志侧自行记录。
 type BusinessError struct {
-	Code    string `json:"code"` // 业务错误码（如SESSION_CREATE）
+	Code    string `json:"code"` // 业务错误码（如 SESSION_CREATE）
 	Message string `json:"message"`
-} // 用户
+}

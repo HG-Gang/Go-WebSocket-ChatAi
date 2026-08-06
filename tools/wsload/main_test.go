@@ -1,3 +1,6 @@
+// tools/wsload/main_test.go
+// 文件功能：覆盖参数解析与非法参数拦截、延迟百分位计算、报告聚合与 JSON 输出，
+// 以及基于本地 echo 服务器的端到端压测流程。
 package main
 
 import (
@@ -121,6 +124,7 @@ func TestReportJSONContainsCapacityConclusion(t *testing.T) {
 }
 
 func TestRunStatsForConfigAgainstLocalEchoServer(t *testing.T) {
+	// 本地 echo 服务器作为测试替身：读取客户端消息后回写 "ack"，模拟 Realtime 服务端行为。
 	upgrader := websocket.Upgrader{}
 	messages := make(chan string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +180,7 @@ func TestRunStatsForConfigAgainstLocalEchoServer(t *testing.T) {
 	}
 }
 
+// errString 把字符串包装为 error，便于在断言中构造期望的错误原因。
 type errString string
 
 func (e errString) Error() string { return string(e) }

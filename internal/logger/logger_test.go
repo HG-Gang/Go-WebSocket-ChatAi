@@ -1,3 +1,6 @@
+// internal/logger/logger_test.go
+// 日志系统测试：覆盖按天轮转与跨日切换文件、过期日志清理与审计相对路径、
+// 敏感字段脱敏不泄露原文，以及测试环境的全局状态隔离。
 package logger
 
 import (
