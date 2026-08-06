@@ -1,3 +1,12 @@
+// internal/handler/debug_handler_test.go
+// 调试诊断接口的单元测试。
+//
+// 测试范围：
+//   - resolveProxy: Realtime 拨号代理优先级（config > env > 直连）与空白处理。
+//   - maskAPIKey: 空值、短值、OpenAI project/classic、Azure hex 各风格的脱敏结果。
+//   - DebugStatusHandler: 统一 monitor 快照结构、字段口径与日志节流（轮询场景不刷日志）。
+//
+// 注意：API Key 等敏感字段在测试中只使用伪造值，仅验证脱敏形状，不校验真实密钥。
 package handler
 
 import (

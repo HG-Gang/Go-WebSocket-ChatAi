@@ -1,3 +1,7 @@
+// internal/middleware/auth_test.go
+// Auth 中间件与 token 签发测试。
+// 覆盖两个安全点：空密钥必须拒绝签发（禁止回退到固定默认密钥）、
+// user_name claim 必须注入 gin Context 供后续监控与限流使用。
 package middleware
 
 import (

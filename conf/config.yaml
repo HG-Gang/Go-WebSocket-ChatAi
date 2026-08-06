@@ -45,11 +45,17 @@ logs:
   retention_days: 30        # 开发和默认环境保留最近 30 天按天日志
   cleanup_interval: "24h"   # 后台日志清理任务运行间隔
 
-# 数据库配置（暂作为预留项）
+# 数据库配置（Web 请求明细持久化）
 db:
-  enabled: false      # 是否启用数据库
-  driver: "mysql"     # 驱动名称
-  dsn: ""             # 数据库连接串（Data Source Name）
+  enabled: true                 # 启用 SQLite 请求明细库
+  driver: "sqlite"              # sqlite | mysql
+  dsn: "./data/tozoai.db"       # sqlite 文件路径；mysql 时填完整 DSN
+
+# 聊天看板上传配置
+web_chat:
+  max_upload_bytes: 10485760    # 10MB
+  max_pdf_chars: 100000
+  upload_dir: "./data/uploads"
 
 # 全局功能开关
 rate_limit:

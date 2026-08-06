@@ -1,3 +1,7 @@
+// internal/provider/openai/gateway_protocol_test.go
+// 文件功能：验证 gatewayAdapter 的旧协议→OpenAI 事件规划（含 session.update 自动注入
+// 与去重）、openAIResponseGate 对 response.create/cancel 的串行化，以及 session.update
+// payload 的 GA 结构。测试通过内存 send 回调捕获实际发出的消息断言，不依赖真实 WebSocket。
 package openai
 
 import (
@@ -90,9 +94,9 @@ func TestSessionUpdatePayloadIsGAShape(t *testing.T) {
 			OutputModalities []string `json:"output_modalities"`
 			Audio            struct {
 				Input struct {
-					Format         map[string]any `json:"format"`
-					TurnDetection  any            `json:"turn_detection"`
-					Transcription  map[string]any `json:"transcription"`
+					Format        map[string]any `json:"format"`
+					TurnDetection any            `json:"turn_detection"`
+					Transcription map[string]any `json:"transcription"`
 				} `json:"input"`
 				Output struct {
 					Format map[string]any `json:"format"`

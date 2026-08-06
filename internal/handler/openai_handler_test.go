@@ -1,3 +1,13 @@
+// internal/handler/openai_handler_test.go
+// OpenAI Realtime 入口与 query 覆盖逻辑的单元测试。
+//
+// 测试范围：
+//   - realtimeConfigFromQuery: 第三方中转 URL/Key/模型覆盖、HTTP 地址转 wss 路径、
+//     非法 scheme 拒绝、AllowUpstreamQueryKey 未开启时 query 传 key 被拒绝。
+//   - checkRealtimeOrigin: 生产环境仅放行配置白名单中的 Origin。
+//   - 容量超限时返回 503 并触发钉钉过载告警（使用 httptest 假服务接收告警请求）。
+//
+// 注意：测试通过伪造 conf.Global 与 httptest 服务隔离外部依赖，不发起真实上游请求。
 package handler
 
 import (

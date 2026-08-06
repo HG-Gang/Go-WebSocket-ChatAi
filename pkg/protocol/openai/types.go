@@ -1,6 +1,9 @@
 // pkg/protocol/openai/types.go
-// OpenAI Realtime API 类型定义（参考 go-xiaozhi 的完整实现）
-// 包含：基础类型、音频格式、模态、断句检测、会话配置、消息结构等
+// 文件功能：定义 OpenAI Realtime API 的共享基础类型——特殊数值、音频格式、模态、
+// 断句检测、会话配置、消息结构与 Usage 等，并实现 IntOrInf 的 JSON 序列化边界。
+// 参考 go-xiaozhi 的完整实现。输入：无（纯类型定义）；输出：供客户端与服务端
+// 事件结构体（server_events.go、client_events.go）复用的基础类型。
+// 不负责：具体事件结构的定义与事件的 JSON 序列化/反序列化分发。
 package openai
 
 import (
@@ -11,6 +14,7 @@ import (
 // ======================== 特殊数值类型 ========================
 
 // Inf 表示无限大（用于 max_response_output_tokens = "inf"）
+// 以 math.MaxInt 作为内部哨兵值，合法的 token 数不会达到该值，可与普通整数形式区分。
 const Inf IntOrInf = IntOrInf(math.MaxInt)
 
 // IntOrInf 可以是整数或 "inf" 的类型（OpenAI API 中 max_output_tokens 字段支持 "inf"）
@@ -35,6 +39,7 @@ func (m *IntOrInf) UnmarshalJSON(data []byte) error {
 		*m = Inf
 		return nil
 	}
+	// 空字节按零值（0）处理：上游缺省该字段时不会走到 json.Unmarshal，避免空串解析报错。
 	if len(data) == 0 {
 		return nil
 	}

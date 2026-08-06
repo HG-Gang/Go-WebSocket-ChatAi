@@ -1,3 +1,12 @@
+// internal/handler/stats_handler_test.go
+// 资源统计接口的单元测试。
+//
+// 测试范围：
+//   - StatsResourcesHandler: 预置内存统计后验证 period 选中窗口、模型过滤、
+//     缓存/错误计数与 stats_rollup 审计事件。
+//   - 非法 period 拒绝：非 day/week/month 一律返回 400。
+//
+// 注意：统计走内存版 stats 服务，测试前后调用 ResetForTest 隔离数据。
 package handler
 
 import (

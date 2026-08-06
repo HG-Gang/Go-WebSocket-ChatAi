@@ -1,6 +1,10 @@
-// metrics 包保存调试页面需要的轻量级内存运行指标。
-// 这里的指标只属于当前 Go 进程；Redis 仍然负责持久化状态。
-// 这样可以让调试页面实时查看当前实例状态，同时不在 WebSocket 热路径上增加额外网络访问。
+// internal/service/metrics/metrics.go
+// 文件功能：为 /api/debug/status 调试页面收集当前 Go 进程的轻量级内存运行指标。
+// 输入是各链路协程上报的会话事件、计数器与业务用量，输出是 Snapshot() 返回的可 JSON 化快照 map。
+// 指标只属于当前进程；Redis 持久化状态由其他模块负责，本包不会在 WebSocket 热路径上引入额外网络访问。
+// 本包不参与鉴权与业务决策，指标丢失不影响业务链路。
+// 安全边界：快照不包含密钥、token 或完整对话内容；响应文本、事件线与会话数量均有内存上限；
+// 对外导出前复制 map 与 slice，避免调用方修改全局收集器内部状态。
 package metrics
 
 import (
@@ -171,7 +175,7 @@ type businessMetrics struct {
 	TokensByDay       map[string]uint64 `json:"tokens_by_day"`
 }
 
-// latencySummary 是不保存全量样本的最小值、最大值、平均值累加器。
+// latencySummary 是不保存全量样本的最小值、最大值、平均值累加器，统计值单位均为毫秒。
 type latencySummary struct {
 	Count uint64  `json:"count"`
 	Min   float64 `json:"min"`
@@ -236,6 +240,7 @@ type eventRecord struct {
 }
 
 // responseMetrics 保存单个 OpenAI 响应生命周期摘要。
+// 文本与转写内容按字节受 maxResponseTextChars 限制，只保留最新尾部片段。
 type responseMetrics struct {
 	ResponseID      string
 	Status          string
@@ -298,12 +303,14 @@ func SessionStarted(sessionID, requestID, userID, userName, deviceID, model, rem
 // SessionStartedWithLocation 记录会话开始，并允许 handler 传入代理/CDN 解析出的所在地。
 // location 只接受展示字段，不参与鉴权；缺失时会回退到本地 IP 类型分类。
 func SessionStartedWithLocation(sessionID, requestID, userID, userName, deviceID, model, remoteAddr, userAgent string, location map[string]string) {
+	// sessionID 为空说明调用点不关心会话维度，直接放弃登记，避免污染全局连接计数。
 	if sessionID == "" {
 		return
 	}
 	global.mu.Lock()
 	defer global.mu.Unlock()
 
+	// 新会话的 map 字段在这里统一初始化，热路径自增时无需判空。
 	global.app.ConnectionsTotal++
 	s := &sessionMetrics{
 		SessionID:       sessionID,
@@ -331,6 +338,7 @@ func SessionEnded(sessionID, reason string, duration time.Duration) {
 	global.mu.Lock()
 	defer global.mu.Unlock()
 
+	// 同一会话只收口一次：EndedAt 已写入说明 SessionEnded 已生效，重复调用直接忽略。
 	if s := global.sessions[sessionID]; s != nil {
 		if !s.EndedAt.IsZero() {
 			return
@@ -342,8 +350,10 @@ func SessionEnded(sessionID, reason string, duration time.Duration) {
 		addSessionEventLocked(s, "session_ended", reason, "", 0, "")
 	}
 
+	// 会话记录不存在时也累计全局断链计数，保证断链信息不因会话过期而丢失。
 	global.app.DisconnectsTotal++
 	incMap(global.app.DisconnectReasons, reason)
+	// 只有白名单原因视为正常关闭，其余（心跳超时、写失败等）归入异常断链。
 	if reason == "normal" || reason == "provider_return" || reason == "session_close" {
 		global.app.NormalDisconnects++
 	} else {
@@ -352,6 +362,7 @@ func SessionEnded(sessionID, reason string, duration time.Duration) {
 	if strings.Contains(reason, "heartbeat_timeout") {
 		global.app.HeartbeatTimeouts++
 	}
+	// 会话在线时长按业务维度累加，供诊断页与 token、限流指标关联分析。
 	global.business.SessionDurationMs += uint64(duration.Milliseconds())
 	pruneEndedSessionsLocked()
 }
@@ -384,14 +395,17 @@ func CapacityRejected() {
 func AppMessage(sessionID, eventType string, bytes int, binary bool) {
 	global.mu.Lock()
 	defer global.mu.Unlock()
+	// 负数或异常字节数在转 uint64 前钳制为 0，避免溢出成巨大数值。
 	global.app.MessagesTotal++
 	global.app.BytesIn += uint64(maxInt(bytes, 0))
+	// 二进制帧统一归类为 binary_audio，让诊断页无需区分不同二进制协议前缀。
 	if binary {
 		global.app.BinaryMessages++
 		eventType = "binary_audio"
 	} else {
 		global.app.TextMessages++
 	}
+	// 空事件类型归一到 unknown，保证计数 map 键稳定可读。
 	if eventType == "" {
 		eventType = "unknown"
 	}
@@ -433,6 +447,7 @@ func AppPongReceived(sessionID string) {
 	if s := global.sessions[sessionID]; s != nil {
 		s.AppPongReceived++
 		if !s.LastAppPingAt.IsZero() {
+			// time.Since 精度到微秒，除以 1000 换算成毫秒后参与延迟统计。
 			s.LastPongLatencyMs = float64(time.Since(s.LastAppPingAt).Microseconds()) / 1000
 			updateLatency(&global.app.PongLatencyMs, s.LastPongLatencyMs)
 		}
@@ -442,6 +457,7 @@ func AppPongReceived(sessionID string) {
 
 // AppWrite 记录 Go 写回 App、耳机或浏览器的字节数。
 func AppWrite(sessionID string, bytes int) {
+	// 先走 atomic 累计全局下行字节，会话为空时不再加锁；只有会话维度才需要 mu 保护。
 	size := uint64(maxInt(bytes, 0))
 	global.counters.appBytesOut.Add(size)
 	if sessionID == "" {
@@ -457,6 +473,7 @@ func AppWrite(sessionID string, bytes int) {
 // SlowConsumerDrop 记录 App 下行队列长时间满载的情况。
 // 此时 Go 会丢弃一条下行消息，避免阻塞整个会话。
 func SlowConsumerDrop(sessionID string, bytes int) {
+	// 丢弃消息同时计一次发送队列超时：两者都反映 App 下行通道能力不足，口径保持一致。
 	global.counters.appSlowConsumerDrops.Add(1)
 	global.counters.goSendQueueTimeouts.Add(1)
 	global.mu.Lock()
@@ -470,6 +487,7 @@ func SlowConsumerDrop(sessionID string, bytes int) {
 // QueueDepth 记录最近一次 App 下行队列和 OpenAI 上行队列的长度。
 // 它是“最近观测值”指标，不是累计计数器。
 func QueueDepth(sessionID string, sendLen, sendCap, apiLen, apiCap int) {
+	// 队列深度是最近观测值而非累计值：先用 atomic 覆盖全局最近值，会话维度再在锁内更新。
 	global.counters.lastSendQueueLen.Store(int64(sendLen))
 	global.counters.lastSendQueueCap.Store(int64(sendCap))
 	global.counters.lastAPISendQueueLen.Store(int64(apiLen))
@@ -489,6 +507,7 @@ func QueueDepth(sessionID string, sendLen, sendCap, apiLen, apiCap int) {
 
 // APISendQueueTimeout 记录 App 消息在 send_queue_timeout_ms 内无法进入 OpenAI 上行队列的情况。
 func APISendQueueTimeout(sessionID, eventType, reason string) {
+	// 超时同时计入内存计数和统一资源事件流，让调试页与持久化统计口径一致。
 	global.counters.goAPISendTimeouts.Add(1)
 	stats.RecordResourceEvent(stats.ResourceEvent{
 		Source: stats.SourceRealtime,
@@ -631,6 +650,7 @@ func OpenAIResponseCreated(sessionID, responseID string) {
 
 // OpenAITextDelta 记录流式助手文本，并为最终诊断快照保留有上限的响应文本。
 func OpenAITextDelta(sessionID, responseID, delta string) {
+	// 按 rune（字符）计数而非字节，多字节文本的字符数与界面感知一致。
 	global.counters.openAITextChars.Add(uint64(len([]rune(delta))))
 	if sessionID == "" {
 		return
@@ -662,6 +682,7 @@ func OpenAITranscriptDelta(sessionID, responseID, delta string) {
 // OpenAIAudioDelta 记录流式 base64 音频 payload。
 // 解码字节数和 PCM 时长只是诊断用估算值。
 func OpenAIAudioDelta(sessionID, responseID string, encodedBytes int) {
+	// 解码字节数与 PCM 时长均为估算值，不解析实际音频数据，避免热路径开销。
 	decoded := estimateBase64DecodedBytes(encodedBytes)
 	outputMs := uint64(estimatePCM16Ms(decoded))
 	global.counters.openAIAudioPackets.Add(1)
@@ -683,6 +704,7 @@ func OpenAIAudioDelta(sessionID, responseID string, encodedBytes int) {
 
 // InputAudio 记录 App 发送给 OpenAI 的 base64 音频。
 func InputAudio(sessionID string, encodedBytes int) {
+	// 与 OpenAIAudioDelta 同一套估算口径，保证输入输出音频时长可比。
 	ms := uint64(estimatePCM16Ms(estimateBase64DecodedBytes(encodedBytes)))
 	global.counters.businessInputAudioMs.Add(ms)
 	if sessionID == "" {
@@ -708,6 +730,7 @@ func OpenAIResponseDone(sessionID, responseID, status string, inputTokens, outpu
 // OpenAIResponseDoneUsage 收口一次响应生命周期，并记录 response.done 返回的完整 token 明细。
 func OpenAIResponseDoneUsage(sessionID, responseID, status string, usage ResponseTokenUsage) {
 	global.counters.openAIResponseDone.Add(1)
+	// 按 status 更新响应结果分布；未匹配的状态不计入任何分布，只保留在 done 总数中。
 	switch status {
 	case "completed":
 		global.counters.openAIResponseOK.Add(1)
@@ -716,6 +739,7 @@ func OpenAIResponseDoneUsage(sessionID, responseID, status string, usage Respons
 	case "failed", "incomplete":
 		global.counters.openAIResponseFailed.Add(1)
 	}
+	// 归一化 token 明细：TotalTokens 未填时回退为输入输出之和；负数计数转 uint64 前钳制为 0。
 	if usage.TotalTokens <= 0 {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
@@ -730,10 +754,12 @@ func OpenAIResponseDoneUsage(sessionID, responseID, status string, usage Respons
 	global.counters.businessCachedTokens.Add(cached)
 	global.counters.businessReasoning.Add(reasoning)
 
+	// 业务总量走 atomic 热路径；按天分组需要 map 计数，进入锁内更新。
 	global.mu.Lock()
 	defer global.mu.Unlock()
 	incMapBy(global.business.TokensByDay, time.Now().Format("2006-01-02"), totalTokens)
 
+	// 会话维度：回填响应摘要的 token 与耗时，并把用量拆分到用户和模型，便于定位超限来源。
 	if s := global.sessions[sessionID]; s != nil {
 		r := ensureResponseLocked(s, responseID)
 		now := time.Now()
@@ -749,6 +775,7 @@ func OpenAIResponseDoneUsage(sessionID, responseID, status string, usage Respons
 		s.ReasoningTokens += reasoning
 		incMapBy(global.business.TokensByUser, s.UserID, totalTokens)
 		incMapBy(global.business.TokensByModel, s.Model, totalTokens)
+		// 耗时由微秒换算毫秒；created_at 缺失时跳过，无法推断的指标不猜测。
 		if !r.CreatedAt.IsZero() {
 			r.DurationMs = float64(now.Sub(r.CreatedAt).Microseconds()) / 1000
 			updateLatency(&global.openai.ResponseLatencyMs, r.DurationMs)
@@ -828,6 +855,7 @@ func RateLimitRejected(userID, model, path, reason string) {
 	})
 	global.mu.Lock()
 	defer global.mu.Unlock()
+	// 限流发生在连接建立前，没有会话可关联，只进全局错误摘要。
 	recordErrorLocked("", "rate_limit_rejected", strings.Join([]string{userID, model, path, reason}, " "), "")
 }
 
@@ -845,6 +873,8 @@ func BillingError(sessionID string, err error) {
 	recordErrorLocked(sessionID, "billing_error", errorString(err), "")
 }
 
+// sourceFromPath 按请求路径归类限流来源。
+// 使用子串匹配兼容不同版本的路由前缀，未命中的路径统一归为系统来源。
 func sourceFromPath(path string) string {
 	path = strings.TrimSpace(path)
 	if strings.Contains(path, "/ws/realtime/") {
@@ -862,6 +892,8 @@ func Snapshot() map[string]any {
 	global.mu.Lock()
 	defer global.mu.Unlock()
 
+	// 先在锁内复制各指标结构，并把 atomic 热路径计数合入副本；atomic 在锁外仍会继续变化，
+	// 快照读到的是调用时刻的近似值，诊断场景可接受。
 	app := global.app
 	applyAppHotCounters(&app)
 	app.MessageTypes = cloneMap(global.app.MessageTypes)
@@ -887,6 +919,7 @@ func Snapshot() map[string]any {
 	goStats := global.goStats
 	applyGoHotCounters(&goStats)
 
+	// 会话按开始时间倒序排列并裁剪到 maxRecentSessions，保证轮询响应体大小稳定。
 	sessions := make([]map[string]any, 0, len(global.sessions))
 	for _, s := range global.sessions {
 		sessions = append(sessions, snapshotSessionLocked(s))
@@ -898,6 +931,7 @@ func Snapshot() map[string]any {
 		sessions = sessions[:maxRecentSessions]
 	}
 
+	// uptime_seconds 是进程启动以来的秒数；started_at 用 RFC3339 便于 JSON 直接解析。
 	return map[string]any{
 		"started_at":       global.started.Format(time.RFC3339),
 		"uptime_seconds":   int64(time.Since(global.started).Seconds()),
@@ -914,6 +948,8 @@ func Snapshot() map[string]any {
 // snapshotSessionLocked 将单个会话转换为诊断页面使用的 JSON 结构。
 // 调用方必须已经持有 global.mu。
 func snapshotSessionLocked(s *sessionMetrics) map[string]any {
+	// 按最近到最早展开响应摘要（RecentResponses 是按创建顺序追加的 id 环），
+	// 并截断大段文本，防止长对话撑大轮询响应。
 	responses := make([]map[string]any, 0, len(s.RecentResponses))
 	for i := len(s.RecentResponses) - 1; i >= 0; i-- {
 		id := s.RecentResponses[i]
@@ -964,7 +1000,7 @@ func snapshotSessionLocked(s *sessionMetrics) map[string]any {
 		"openai_events_down":   s.OpenAIEventsDown,
 		"openai_reconnects":    s.OpenAIReconnects,
 		"slow_consumer_drops":  s.SlowConsumerDrops,
-		"pipeline_workers":     4,
+		"pipeline_workers":     4, // 与 OpenAI Provider 的四协程流水线一一对应
 		"send_queue_len":       s.LastSendQueueLen,
 		"send_queue_cap":       s.LastSendQueueCap,
 		"api_queue_len":        s.LastAPIQueueLen,
@@ -981,11 +1017,13 @@ func snapshotSessionLocked(s *sessionMetrics) map[string]any {
 	}
 }
 
+// applyAppHotCounters 把 App 侧 atomic 热路径计数合入快照副本。
 func applyAppHotCounters(app *appMetrics) {
 	app.BytesOut = global.counters.appBytesOut.Load()
 	app.SlowConsumerDrops = global.counters.appSlowConsumerDrops.Load()
 }
 
+// applyGoHotCounters 把网关压力 atomic 计数合入快照副本。
 func applyGoHotCounters(goStats *goMetrics) {
 	goStats.CapacityRejected = global.counters.goCapacityRejected.Load()
 	goStats.APISendQueueTimeouts = global.counters.goAPISendTimeouts.Load()
@@ -997,6 +1035,7 @@ func applyGoHotCounters(goStats *goMetrics) {
 	goStats.LastAPISendQueueCap = int(global.counters.lastAPISendQueueCap.Load())
 }
 
+// applyOpenAIHotCounters 把 OpenAI 侧 atomic 计数合入快照副本。
 func applyOpenAIHotCounters(openai *openAIMetrics) {
 	openai.PingSent = global.counters.openAIPingSent.Load()
 	openai.PingFailures = global.counters.openAIPingFailures.Load()
@@ -1013,6 +1052,7 @@ func applyOpenAIHotCounters(openai *openAIMetrics) {
 	openai.AudioDeltaPackets = global.counters.openAIAudioPackets.Load()
 }
 
+// applyBusinessHotCounters 把业务用量 atomic 计数合入快照副本。
 func applyBusinessHotCounters(business *businessMetrics) {
 	business.InputAudioMs = global.counters.businessInputAudioMs.Load()
 	business.OutputAudioMs = global.counters.businessOutputAudioMs.Load()
@@ -1040,6 +1080,7 @@ func addSessionEventLocked(s *sessionMetrics, kind, detail, responseID string, b
 		Code:       code,
 	}
 	s.Events = append(s.Events, rec)
+	// 超过上限时只保留最新尾部并复制到新切片，旧底层数组可被 GC 回收，事件线不会无限增长。
 	if len(s.Events) > maxSessionEvents {
 		s.Events = append([]eventRecord(nil), s.Events[len(s.Events)-maxSessionEvents:]...)
 	}
@@ -1062,9 +1103,11 @@ func recordErrorLocked(sessionID, reason, detail, code string) {
 		Code:   code,
 	}
 	global.errors.Recent = append(global.errors.Recent, rec)
+	// 全局错误线复用 maxSessionEvents 上限，超过时同样只保留最新尾部。
 	if len(global.errors.Recent) > maxSessionEvents {
 		global.errors.Recent = append([]eventRecord(nil), global.errors.Recent[len(global.errors.Recent)-maxSessionEvents:]...)
 	}
+	// 找到会话时把同一错误镜像到会话时间线，诊断页可同时从全局与会话视角看到它。
 	if s := global.sessions[sessionID]; s != nil {
 		addSessionEventLocked(s, "error:"+reason, detail, "", 0, code)
 	}
@@ -1081,6 +1124,7 @@ func pruneEndedSessionsLocked() {
 		id string
 		at time.Time
 	}
+	// 只收集已结束会话，活跃会话永远不会被裁剪；EndedAt 缺失时退回开始时间参与排序。
 	ended := make([]endedSession, 0, len(global.sessions))
 	for id, s := range global.sessions {
 		if s == nil || s.Active {
@@ -1096,6 +1140,7 @@ func pruneEndedSessionsLocked() {
 		return ended[i].at.Before(ended[j].at)
 	})
 
+	// 从结束时间最早的开始删除，只回收到内存上限，不区分会话归属。
 	deleteCount := len(global.sessions) - maxRecentSessions
 	for i := 0; i < deleteCount && i < len(ended); i++ {
 		delete(global.sessions, ended[i].id)
@@ -1105,6 +1150,7 @@ func pruneEndedSessionsLocked() {
 // ensureResponseLocked 返回已有响应记录，找不到时创建新记录。
 // 它还会把单会话响应环裁剪到 maxRecentResponses。
 func ensureResponseLocked(s *sessionMetrics, responseID string) *responseMetrics {
+	// responseID 缺失（部分 delta 事件不带 id）归一到 unknown，保证快照键稳定。
 	if responseID == "" {
 		responseID = "unknown"
 	}
@@ -1114,6 +1160,7 @@ func ensureResponseLocked(s *sessionMetrics, responseID string) *responseMetrics
 	r := &responseMetrics{ResponseID: responseID, CreatedAt: time.Now(), Status: "unknown"}
 	s.Responses[responseID] = r
 	s.RecentResponses = append(s.RecentResponses, responseID)
+	// 单会话保留最近 maxRecentResponses 条响应，超过时淘汰最旧的并删除其记录，避免长对话内存膨胀。
 	if len(s.RecentResponses) > maxRecentResponses {
 		old := s.RecentResponses[0]
 		s.RecentResponses = append([]string(nil), s.RecentResponses[1:]...)
@@ -1133,6 +1180,7 @@ func markFirstDeltaLocked(r *responseMetrics) {
 
 // updateLatency 在不保存全量样本的情况下更新最小值、最大值和平均值。
 func updateLatency(s *latencySummary, value float64) {
+	// 负延迟视为无效样本（时钟回拨或记录错误），直接忽略以避免污染 min/avg。
 	if value < 0 {
 		return
 	}
@@ -1178,6 +1226,7 @@ func appendLimited(dst *string, delta string, limit int) {
 		return
 	}
 	*dst += delta
+	// 超过上限时按字节保留最新尾部；UTF-8 多字节字符可能被截断，快照只做展示，允许该情况。
 	if len(*dst) > limit {
 		*dst = (*dst)[len(*dst)-limit:]
 	}
@@ -1196,6 +1245,7 @@ func estimateBase64DecodedBytes(encodedLen int) int {
 	if encodedLen <= 0 {
 		return 0
 	}
+	// 按每 4 个 base64 字符对应 3 字节近似，忽略尾部 padding，误差不超过 2 字节，诊断用足够。
 	return encodedLen * 3 / 4
 }
 
@@ -1204,6 +1254,7 @@ func estimatePCM16Ms(bytes int) int {
 	if bytes <= 0 {
 		return 0
 	}
+	// 24kHz 单声道 16 位采样：每秒 24000 个采样点、每个采样点 2 字节，结果单位毫秒。
 	return bytes * 1000 / (24000 * 2)
 }
 
@@ -1232,6 +1283,7 @@ func realIPFromRemoteAddr(remoteAddr string) string {
 	if value == "" {
 		return ""
 	}
+	// SplitHostPort 成功说明是 host:port 形式（IPv6 带方括号）；失败则输入本身是纯 IP。
 	if host, _, err := net.SplitHostPort(value); err == nil {
 		return strings.Trim(host, "[]")
 	}
@@ -1270,7 +1322,10 @@ func ipLocationSummary(ipText string) map[string]string {
 	}
 }
 
+// sessionIPLocation 返回会话展示用的 IP 归属。
+// 优先使用外部传入的归属信息；未提供时才用本地 IP 分类器兜底，整个过程不依赖外部服务。
 func sessionIPLocation(s *sessionMetrics) map[string]string {
+	// 返回副本，避免调用方修改会话持有的归属数据。
 	if s != nil && len(s.IPLocation) > 0 {
 		return cloneStringMap(s.IPLocation)
 	}
@@ -1280,7 +1335,9 @@ func sessionIPLocation(s *sessionMetrics) map[string]string {
 	return ipLocationSummary(realIPFromRemoteAddr(s.RemoteAddr))
 }
 
+// normalizeIPLocation 清洗代理/CDN 传入的 IP 归属字段，只保留非空值并统一 key 为小写。
 func normalizeIPLocation(location map[string]string) map[string]string {
+	// 空输入返回 nil，快照侧会回退到本地 IP 分类器。
 	if len(location) == 0 {
 		return nil
 	}
@@ -1295,12 +1352,14 @@ func normalizeIPLocation(location map[string]string) map[string]string {
 	if len(out) == 0 {
 		return nil
 	}
+	// source 与 status 缺失时补默认值，保证快照字段完整。
 	if out["source"] == "" {
 		out["source"] = "request_header"
 	}
 	if out["status"] == "" {
 		out["status"] = "provided"
 	}
+	// display 由 country/region/city 按顺序拼接，缺失字段自动跳过。
 	if out["display"] == "" {
 		parts := make([]string, 0, 3)
 		for _, key := range []string{"country", "region", "city"} {
@@ -1315,6 +1374,7 @@ func normalizeIPLocation(location map[string]string) map[string]string {
 	return out
 }
 
+// cloneStringMap 在导出前复制字符串 map，避免调用方修改收集器内部状态。
 func cloneStringMap(src map[string]string) map[string]string {
 	out := make(map[string]string, len(src))
 	for key, value := range src {

@@ -1,9 +1,13 @@
 // internal/middleware/rate.go
-// 全局限流中间件：
-// 实现基于用户、模型、接口维度的访问控制，防止 API 被滥用。
-// 采用双层限流策略：
-// 1. 内存令牌桶（Local Rate Limiting）：极高性能，适用于快速拦截。
-// 2. Redis 分布式计数（Global Rate Limiting）：集群环境下保证全局配额一致性。
+// 全局限流中间件。
+// 文件功能：
+// - 输入：gin Context（依赖 Auth 中间件先注入 user_id）、路由模式与 model 查询参数。
+// - 输出：限流通过时放行请求，超限时以 429 中止并返回 rps/burst 配置。
+// - 采用双层限流：内存令牌桶（Local，本地快速拦截）+ Redis 原子计数（Global，集群全局配额）。
+// - 不负责鉴权；未注入 user_id 的请求按未认证拒绝。
+// 安全边界：
+// - Redis 未启用或计数失败时降级为仅内存限流，降级期间全局配额无法保证。
+// - 内存限流器按空闲时间回收，避免高基数 key 导致内存无界增长。
 package middleware
 
 import (
@@ -40,11 +44,10 @@ var (
 	lastCleanup time.Time
 )
 
-// RateLimit 全局限流中间件入口
+// RateLimit 返回全局限流中间件：先本地令牌桶快速拦截，再 Redis 计数做全局配额校验。
 func RateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1. 检查全局限流开关
-		// 如果配置中关闭了限流功能，则直接放行
+		// 全局开关关闭时直接放行，不做任何限流。
 		if !conf.Global.RateLimit.Enabled {
 			c.Next()
 			return
@@ -52,31 +55,29 @@ func RateLimit() gin.HandlerFunc {
 
 		log := logger.GetModelLogger("global")
 
-		// 2. 提取限流维度参数
-		// 获取模型名称，默认为 "openai"
+		// 限流维度之一为模型名，缺失时默认 openai，与上游默认模型保持一致。
 		model := c.Query("model")
 		if model == "" {
 			model = "openai"
 		}
 
-		// 获取用户 ID（由 Auth 中间件注入）
+		// 用户维度来自 Auth 中间件注入的 user_id；未注入说明请求未完成鉴权，直接拒绝。
 		userID, exists := c.Get("user_id")
 		if !exists {
-			// 如果没有用户 ID，说明请求未经过鉴权或鉴权失败，拒绝访问
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing user_id for rate limiting"})
 			return
 		}
 
-		// 获取完整的接口路径
+		// 路由维度使用注册的路由模式（如 /v1/chat/completions），而非带参数的完整 URL，避免 key 爆炸。
 		path := c.FullPath()
 
-		// 3. 获取该模型的特定限流配置
+		// 按模型读取限流配置；模型被禁用时不做限流拦截。
 		modelCfg := conf.GetModel(model)
-		// 如果模型被禁用，则不进行限流拦截
 		if !modelCfg.Enabled {
 			c.Next()
 			return
 		}
+		// RPS 或 Burst 非法时无法构造令牌桶；跳过限流并告警，避免配置错误误伤正常请求。
 		if modelCfg.RateRPS <= 0 || modelCfg.RateBurst <= 0 {
 			log.Warn("模型限流参数无效，跳过限流",
 				zap.String("model", model),
@@ -86,16 +87,15 @@ func RateLimit() gin.HandlerFunc {
 			return
 		}
 
-		// 4. 构建唯一的限流标识 (Key)
-		// 维度：用户 + 模型 + 路径
+		// 构建唯一限流标识：维度为 用户 + 模型 + 路由；先用 MD5 压缩 key 长度，降低 Redis 存储开销。
 		rawKey := fmt.Sprintf("rate_limit:%s:%s:%s", userID, model, path)
-		// 使用 MD5 对 Key 进行哈希，缩短长度并规整化，优化 Redis 存储性能
 		hash := md5.Sum([]byte(rawKey))
 		limitKey := fmt.Sprintf("rate_limit:%x", hash)
 
-		// 5. 第一层：内存令牌桶限流（快速拦截）
+		// 第一层：本地令牌桶限流，无网络开销，承担绝大部分快速拦截。
 		now := time.Now()
 		mu.Lock()
+		// 定期回收空闲超过 10 分钟的限流器，防止长期运行后内存无界增长。
 		if now.Sub(lastCleanup) >= localLimiterCleanupInterval {
 			for key, entry := range limiters {
 				if now.Sub(entry.lastSeen) > localLimiterTTL {
@@ -106,9 +106,7 @@ func RateLimit() gin.HandlerFunc {
 		}
 		entry, ok := limiters[limitKey]
 		if !ok {
-			// 首次访问时创建限流器
-			// RateRPS: 每秒产生的令牌数
-			// RateBurst: 桶的最大容量（突发处理能力）
+			// 首次访问创建令牌桶：RateRPS 为每秒补充令牌数，RateBurst 为桶容量（突发上限）。
 			entry = &limiterEntry{limiter: rate.NewLimiter(rate.Limit(modelCfg.RateRPS), modelCfg.RateBurst)}
 			limiters[limitKey] = entry
 		}
@@ -116,7 +114,7 @@ func RateLimit() gin.HandlerFunc {
 		limiter := entry.limiter
 		mu.Unlock()
 
-		// 尝试获取令牌，如果没有可用令牌则直接拒绝
+		// 本地桶无可用令牌即拒绝，被拒绝的请求不再进入 Redis 层。
 		if !limiter.Allow() {
 			metrics.RateLimitRejected(userID.(string), model, path, "local")
 			log.Warn("触发内存限流拦截",
@@ -132,16 +130,15 @@ func RateLimit() gin.HandlerFunc {
 			return
 		}
 
-		// 6. 第二层：Redis 分布式限流（全局同步）
-		// 注意：如果 Redis 未启用或连接失败，系统将降级为仅使用内存限流
+		// 第二层：Redis 原子计数，多实例共用同一 key，保证集群全局配额一致。
 		ctx := c.Request.Context()
-		redisClient := redis.GetClient() // Redis 未启用时返回 nil，安全降级
+		redisClient := redis.GetClient() // Redis 未启用时返回 nil，此时降级为仅本地限流
 		if redisClient == nil {
 			c.Next()
 			return
 		}
 
-		// 原子递增当前秒内的请求计数
+		// 对当前秒的计数原子递增；失败时降级放行并告警，代价是降级期间全局配额约束失效。
 		cnt, err := redisClient.Incr(ctx, limitKey).Result()
 		if err != nil {
 			log.Warn("Redis 限流计数操作失败，已降级为本地限流", zap.Error(err))
@@ -149,12 +146,12 @@ func RateLimit() gin.HandlerFunc {
 			return
 		}
 
-		// 如果是该秒内的第一次请求，设置 1 秒的过期时间，确保计数重置
+		// 每秒第一次计数时设置 1 秒过期，使计数窗口按自然秒自动重置。
 		if cnt == 1 {
 			_ = redisClient.Expire(ctx, limitKey, 1*time.Second).Err()
 		}
 
-		// 检查分布式计数是否超过了配置的突发上限
+		// 全局每秒计数超过模型 Burst 即拒绝，保证集群总量不突破配置的突发上限。
 		if cnt > int64(modelCfg.RateBurst) {
 			metrics.RateLimitRejected(userID.(string), model, path, "global")
 			log.Warn("触发分布式全局限流拦截",
@@ -172,7 +169,7 @@ func RateLimit() gin.HandlerFunc {
 			return
 		}
 
-		// 7. 限流通过，继续业务处理
+		// 双层限流均通过，放行业务处理。
 		c.Next()
 	}
 }

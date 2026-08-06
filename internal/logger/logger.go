@@ -5,6 +5,9 @@
 // 3. 文件日志不输出 ANSI 颜色控制字符，避免出现 [34mINFO[0m 这类内容。
 // 4. 时间格式统一为 “年-月-日 时:分:秒”，不带 +0800 时区后缀。
 // 5. 日志实例按模型缓存，文件写入时再按当前日期选择目标文件，避免长连接跨零点后继续写旧文件。
+// 安全边界：
+// - RedactField 对高风险字段只输出长度与 sha256 摘要，原始密钥/凭据不落日志。
+// - 日志清理审计只记录根目录内相对路径，不把服务器绝对目录写入审计文件。
 package logger
 
 import (
@@ -123,6 +126,7 @@ type dailyFileWriteSyncer struct {
 	file  *os.File
 }
 
+// Write 实现 zapcore.WriteSyncer：写入前按当天日期切换文件，跨日自动打开新文件。
 func (w *dailyFileWriteSyncer) Write(p []byte) (int, error) {
 	if conf.Global == nil || conf.Global.Logs.RootDir == "" {
 		return 0, fmt.Errorf("日志配置未初始化")
@@ -137,6 +141,7 @@ func (w *dailyFileWriteSyncer) Write(p []byte) (int, error) {
 	return w.file.Write(p)
 }
 
+// Sync 刷盘并主动关闭当天文件句柄，便于 Windows 环境及时释放文件（测试与清理场景需要）。
 func (w *dailyFileWriteSyncer) Sync() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -154,6 +159,7 @@ func (w *dailyFileWriteSyncer) Sync() error {
 	return closeErr
 }
 
+// rotateLocked 在调用方已持锁的前提下切换日期文件：同一天复用句柄，跨天先同步关闭旧文件再建新文件。
 func (w *dailyFileWriteSyncer) rotateLocked(dateStr string) error {
 	if w.file != nil && w.date == dateStr {
 		return nil
@@ -316,6 +322,8 @@ func CleanExpiredLogs(days int, model string) LogCleanupSummary {
 			return nil
 		}
 		summary.ScannedCount++
+		// 文件名形如 <model>-2006-01-02.log，以其中日期段判定过期（与按天轮转的文件名约定一致），
+		// 而不是依赖修改时间；日期段缺失或解析失败的文件不参与删除。
 		filename := filepath.Base(path)
 		if len(filename) < len("x-2006-01-02.log") {
 			return nil
@@ -371,9 +379,12 @@ func RedactField(key, value string) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(value))
+	// 只输出 6 字节摘要前缀，兼顾可追溯性且不泄露原文。
 	return fmt.Sprintf("[REDACTED len=%d sha256:%x]", len(value), sum[:6])
 }
 
+// isSensitiveLogKey 判断字段名是否命中敏感词表；命中即代表该字段值不得原样落盘。
+// 使用包含匹配（如 value、content）是为了覆盖未知前缀的同类字段，宁严勿松。
 func isSensitiveLogKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	if key == "" {
@@ -406,8 +417,7 @@ func isSensitiveLogKey(key string) bool {
 	return false
 }
 
-// SafeURLForDisplay keeps URL routing context while redacting credentials and
-// token-like query parameters before the value is returned to pages or logs.
+// SafeURLForDisplay 保留 URL 的路由上下文，同时把凭据与 token 类查询参数脱敏后再展示到页面或日志。
 func SafeURLForDisplay(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -445,6 +455,7 @@ func newLogCleanupSummary(days int, model string) LogCleanupSummary {
 	}
 }
 
+// relativeLogPath 把日志文件路径转为相对日志根目录的斜杠路径；转换失败时原样返回，保证审计仍可写入。
 func relativeLogPath(path string) string {
 	if conf.Global == nil || conf.Global.Logs.RootDir == "" || path == "" {
 		return filepath.ToSlash(path)

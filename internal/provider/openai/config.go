@@ -1,6 +1,8 @@
 // internal/provider/openai/config.go
-// OpenAI 模型专属配置封装
-// 功能：包装 conf.ModelConfig，提供带默认值的便捷读取方法
+// OpenAI 模型专属配置封装：包装 conf.ModelConfig，提供带默认值的便捷读取方法。
+// 输入：conf.ModelConfig（加载自 conf/models 目录的模型配置）；输出：WebSocket 地址、握手 Header、超时与重试参数。
+// 明确不负责：请求发送与密钥管理，仅读取已配置的 APIKey 供调用方使用。
+// 安全边界：BuildRealtimeHeader 产出的 Authorization/api-key 只用于上游握手，密钥不写入日志。
 package openai
 
 import (
@@ -33,6 +35,7 @@ func (c *OpenAIConfig) GetWsURL() string {
 	return "wss://api.openai.com/v1/realtime"
 }
 
+// GetDefaultModel 返回默认模型名，未配置时为 gpt-realtime。
 func (c *OpenAIConfig) GetDefaultModel() string {
 	if c.DefaultModel != "" {
 		return c.DefaultModel
@@ -167,6 +170,9 @@ func (c *OpenAIConfig) BuildRealtimeHeader() http.Header {
 	return header
 }
 
+// buildAzureRealtimeURL 组装 Azure Realtime WebSocket 地址。
+// 显式配置了 ws_url 时在其基础上补参数；否则用 Endpoint 推导，并兼容 GA（/openai/v1/realtime?model=）
+// 与 Preview（/openai/realtime?api-version=&deployment=）两种风格。
 func (c *OpenAIConfig) buildAzureRealtimeURL() (string, error) {
 	if strings.TrimSpace(c.Realtime.WsUrl) != "" {
 		return c.completeAzureRealtimeQuery(c.Realtime.WsUrl)
@@ -185,6 +191,7 @@ func (c *OpenAIConfig) buildAzureRealtimeURL() (string, error) {
 	}
 	u.Scheme = "wss"
 
+	// 按 path 或 extra.realtime_api_style 区分 URL 风格，保证新旧 Azure 资源都能正确连接。
 	apiStyle := strings.ToLower(firstNonEmpty(c.ExtraString("realtime_api_style"), c.ExtraString("api_style")))
 	if strings.Contains(u.Path, "/openai/v1") || apiStyle == "ga" {
 		u.Path = strings.TrimRight(strings.TrimSuffix(u.Path, "/realtime"), "/") + "/realtime"
@@ -210,6 +217,7 @@ func (c *OpenAIConfig) buildAzureRealtimeURL() (string, error) {
 	return u.String(), nil
 }
 
+// completeAzureRealtimeQuery 在显式配置的 Azure ws_url 基础上补齐缺失的 model 或 api-version/deployment 参数。
 func (c *OpenAIConfig) completeAzureRealtimeQuery(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -292,6 +300,7 @@ func (c *OpenAIConfig) GetApiReadTimeout() time.Duration {
 	return 120 * time.Second
 }
 
+// GetApiPingInterval 获取 Go→OpenAI 发送 Ping 的间隔，未配置时默认 30s。
 func (c *OpenAIConfig) GetApiPingInterval() time.Duration {
 	if c.Realtime.ApiPingInterval != "" {
 		if d, err := time.ParseDuration(c.Realtime.ApiPingInterval); err == nil {
@@ -301,6 +310,7 @@ func (c *OpenAIConfig) GetApiPingInterval() time.Duration {
 	return 30 * time.Second
 }
 
+// GetApiPongTimeout 获取等待 OpenAI Pong 的超时时间，未配置时默认 90s；超时视为上游失联。
 func (c *OpenAIConfig) GetApiPongTimeout() time.Duration {
 	if c.Realtime.ApiPongTimeout != "" {
 		if d, err := time.ParseDuration(c.Realtime.ApiPongTimeout); err == nil {
@@ -310,6 +320,7 @@ func (c *OpenAIConfig) GetApiPongTimeout() time.Duration {
 	return 90 * time.Second
 }
 
+// GetApiWriteTimeout 获取向 OpenAI 写消息的超时时间，未配置时默认 10s。
 func (c *OpenAIConfig) GetApiWriteTimeout() time.Duration {
 	if c.Realtime.ApiWriteTimeout != "" {
 		if d, err := time.ParseDuration(c.Realtime.ApiWriteTimeout); err == nil {
@@ -319,10 +330,12 @@ func (c *OpenAIConfig) GetApiWriteTimeout() time.Duration {
 	return 10 * time.Second
 }
 
+// ShouldRestoreSession 是否在重连后恢复会话上下文，未配置时默认关闭。
 func (c *OpenAIConfig) ShouldRestoreSession() bool {
 	return c.Realtime.RestoreSession
 }
 
+// GetRestoreHistoryLimit 恢复会话时携带的历史消息条数上限，未配置时默认 32 条。
 func (c *OpenAIConfig) GetRestoreHistoryLimit() int {
 	if c.Realtime.RestoreHistoryLimit > 0 {
 		return c.Realtime.RestoreHistoryLimit
@@ -330,6 +343,7 @@ func (c *OpenAIConfig) GetRestoreHistoryLimit() int {
 	return 32
 }
 
+// GetSendQueueTimeout 获取发送队列等待超时，配置单位为毫秒，未配置时默认 250ms。
 func (c *OpenAIConfig) GetSendQueueTimeout() time.Duration {
 	if c.Realtime.SendQueueTimeoutMs > 0 {
 		return time.Duration(c.Realtime.SendQueueTimeoutMs) * time.Millisecond

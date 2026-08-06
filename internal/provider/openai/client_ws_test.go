@@ -1,3 +1,8 @@
+// internal/provider/openai/client_ws_test.go
+// 文件功能：验证 Realtime WS 客户端的核心行为——重放状态缓存只收录可安全重放的事件、
+// App 下行队列满时的关键/非关键事件策略、上游 Ping 保活、token 用量转换与统一统计、
+// Close 幂等性。
+// 测试不依赖真实 OpenAI 服务：队列类测试使用最小 Client 桩，Ping 测试使用本地 httptest WS server。
 package openai
 
 import (
@@ -139,8 +144,8 @@ func TestWriteOpenAIPingSendsWebSocketPing(t *testing.T) {
 	}
 }
 
-// Close 可以被 read/write pump、handler defer 或测试清理重复调用。
-// 幂等关闭能避免 nil panic 和 gorilla 连接残留。
+// metricsUsageFromProtocol 必须把输入/输出两侧的 cached 与 reasoning token 合并计数，
+// 且与计费口径一致；这里锁住"总数不变、明细不丢"的转换行为。
 func TestMetricsUsageFromProtocolIncludesCachedAndReasoningTokens(t *testing.T) {
 	usage := metricsUsageFromProtocol(&protocol.Usage{
 		InputTokens:  100,
@@ -207,6 +212,8 @@ func TestResponseDoneRecordsUnifiedStatsUsage(t *testing.T) {
 	}
 }
 
+// Close 可能被 read/write pump、handler defer 或测试清理重复调用；
+// 幂等关闭并清空 apiConn 指针能避免 nil panic 与 gorilla 连接残留。
 func TestCloseIsIdempotentAndClearsRealtimeConnections(t *testing.T) {
 	client := newClientForQueueTest()
 

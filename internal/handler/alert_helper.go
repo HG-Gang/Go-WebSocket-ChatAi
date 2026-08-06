@@ -1,3 +1,12 @@
+// internal/handler/alert_helper.go
+// 告警辅助：实例容量不足拒绝新 WS 连接时发送钉钉告警。
+//
+// 文件功能：
+//   - notifyCapacityOverloadAlert：携带会话数、用户身份和 IP 所在地组装过载事件并发送告警。
+//
+// 安全边界：
+//   - 告警发送失败只记录日志，不影响拒绝连接的主流程（拒绝本身是安全关闭，不能因告警失败放行）。
+//   - 告警使用独立短超时 context，避免客户端断开取消告警，也避免 webhook 阻塞容量拒绝路径。
 package handler
 
 import (
@@ -34,6 +43,8 @@ func notifyCapacityOverloadAlert(log *zap.Logger, providerName, userID, userName
 	}
 }
 
+// alertTimeout 返回告警请求的超时时间，单位毫秒。
+// 配置缺失或非法时回退到 3 秒，保证告警永远不会让主流程等待过久。
 func alertTimeout() time.Duration {
 	if conf.Global == nil || conf.Global.Alerts.DingTalk.TimeoutMs <= 0 {
 		return 3 * time.Second

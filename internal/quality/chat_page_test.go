@@ -1,3 +1,6 @@
+// internal/quality/chat_page_test.go
+// AI 项目助手页（web/chat.html）质量测试：锁定页面三栏职责、token 统计与图表、
+// 主题联动等行为，防止页面回归为旧的文件编辑布局或重新暴露上游调试输入。
 package quality_test
 
 import (

@@ -1,3 +1,6 @@
+// internal/provider/openai/tool_execution_test.go
+// Realtime 工具执行单元测试：验证天气、地图、工作区工具在成功、缺参、未配置密钥等分支下的返回形状。
+// 上游请求用 httptest 假服务验证路径与参数；工作区测试在临时目录执行，避免污染真实工作区。
 package openai
 
 import (
@@ -185,6 +188,7 @@ func TestExecuteWorkspaceFunctionToolReturnsPendingWhenConfirmEnabled(t *testing
 	}
 	conf.Global = &conf.GlobalConfig{}
 	conf.Global.Security.WorkspaceWriteConfirm = true
+	// 清空待确认写盘记录，保证测试之间的 pending 状态互不残留。
 	workspace.ResetPendingWritesForTest()
 	t.Cleanup(func() {
 		_ = os.Chdir(oldWD)

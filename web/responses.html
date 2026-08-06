@@ -1,3 +1,9 @@
+<!--
+web/responses.html
+页面功能：OpenAI Responses API 独立 HTTP 测试页（不占用 Realtime WebSocket 四协程链路），支持发送普通问题或高级 JSON 请求体，展示配置状态与原始响应输出，便于单独排查 Responses 接口链路。
+依赖接口/资源：style.css、theme.js；/api/openai/responses/status、/api/openai/responses、/test/generate-token。
+安全边界：页面仅用于本地开发调试，不承载生产鉴权逻辑；Token 由本地测试接口获取，生产环境需改用真实登录态。
+-->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>

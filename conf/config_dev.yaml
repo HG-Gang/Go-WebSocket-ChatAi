@@ -39,3 +39,14 @@ rate_limit:
 
 fallback:
   enabled: true       # 开启降级功能，便于在 WebSocket 连通性不佳时测试 HTTP 备份路径
+
+# 开发环境默认启用 SQLite 请求明细（覆盖/补齐基础配置）
+db:
+  enabled: true
+  driver: "sqlite"
+  dsn: "./data/tozoai.db"
+
+web_chat:
+  max_upload_bytes: 10485760
+  max_pdf_chars: 100000
+  upload_dir: "./data/uploads"
